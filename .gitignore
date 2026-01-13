@@ -1,5 +1,6 @@
 llm-fingerprinting
 fingerprinting
+fingerprints/
 logs
 .DS_Store
 __pycache__
