@@ -1,0 +1,12 @@
+llm-fingerprinting
+fingerprinting
+logs
+.DS_Store
+__pycache__
+*.pyc
+env/
+venv/
+*.env
+.idea/
+.vscode/
+ollama-api-key
