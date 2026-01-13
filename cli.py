@@ -17,18 +17,18 @@ from datetime import datetime
 # Setup path for local imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from llm_fingerprint.ollama_client import OllamaClient
-from llm_fingerprint.openai_client import OpenAIClient, OpenAIAuthError
-from llm_fingerprint.ollama_cloud_client import OllamaCloudClient, OllamaCloudAuthError
-from llm_fingerprint.deepseek_client import DeepSeekClient, DeepSeekAuthError
-from llm_fingerprint.gemini_client import GeminiClient, GeminiAuthError
-from llm_fingerprint.template_client import TemplateClient, TemplateAuthError
-from llm_fingerprint.prompt_suite import PromptSuite
-from llm_fingerprint.feature_extractor import FeatureExtractor
-from llm_fingerprint.classifier import EnsembleClassifier, create_classifier
-from llm_fingerprint.fingerprinter import LLMFingerprinter
-from llm_fingerprint.fingerprint_store import FingerprintStore
-from llm_fingerprint import config
+from src.ollama_client import OllamaClient
+from src.openai_client import OpenAIClient, OpenAIAuthError
+from src.ollama_cloud_client import OllamaCloudClient, OllamaCloudAuthError
+from src.deepseek_client import DeepSeekClient, DeepSeekAuthError
+from src.gemini_client import GeminiClient, GeminiAuthError
+from src.template_client import TemplateClient, TemplateAuthError
+from src.prompt_suite import PromptSuite
+from src.feature_extractor import FeatureExtractor
+from src.classifier import EnsembleClassifier, create_classifier
+from src.fingerprinter import LLMFingerprinter
+from src.fingerprint_store import FingerprintStore
+from src import config
 
 
 def setup_logging(verbose: bool = False):
