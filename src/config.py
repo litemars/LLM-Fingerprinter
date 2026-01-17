@@ -56,7 +56,7 @@ REQUEST_TIMEOUT = 60
 AUGMENTATION_SAMPLES_PER_ORIGINAL = 5
 
 # Logging
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "DEBUG")
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # Ollama client settings (local)
@@ -84,8 +84,12 @@ GEMINI_DEFAULT_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta"
 GEMINI_TIMEOUT = 60
 GEMINI_MAX_RETRIES = 3
 
-# API Backend options: 'ollama', 'ollama-cloud', 'openai', or 'custom'
-DEFAULT_BACKEND = "ollama"
+# API Backend options: 'ollama', 'ollama-cloud', 'openai', 'deepseek', 'gemini', 'custom'
+DEFAULT_BACKEND = "custom"
+
+CUSTOM_DEFAULT_ENDPOINT = "http://localhost:8000/v1"
+CUSTOM_TIMEOUT = 60
+CUSTOM_MAX_RETRIES = 3
 
 API_KEY_ENV_VARS = {
     "ollama-cloud": "OLLAMA_CLOUD_API_KEY", 

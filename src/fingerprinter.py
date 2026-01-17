@@ -74,16 +74,16 @@ class LLMFingerprinter:
         for i, prompt_dict in enumerate(prompts):
             prompt = prompt_dict['text']
             layer = prompt_dict.get('layer', 'unknown')
-
+            logger.debug(f"Prompt {i+1}/{len(prompts)} (layer: {layer})")
             for rep in range(repeats):
                 try:
+                    logger.debug(f"model: {model_name}, prompt {i+1}, repeat {rep+1}")
                     response = self.client.generate(
                         model=model_name,
                         prompt=prompt,
                         temperature=0.7,
                         max_tokens=512
                     )
-
                     all_responses.append({
                         'prompt': prompt,
                         'response': response,
@@ -266,7 +266,7 @@ class LLMFingerprinter:
             'fingerprint': fp,
         }
 
-        logger.info(f"Identified {model_name} as {family} ({confidence*100:.1f}% confidence)")
+        logger.info(f"Identified as {family} ({confidence*100:.1f}% confidence)")
         return result
 
     def compare_fingerprints(self, fp1, fp2):

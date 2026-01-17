@@ -1,0 +1,158 @@
+# Example Request Files for Custom Backend
+# ==========================================
+
+# Save each example as a separate .txt file
+
+# ==========================================
+# EXAMPLE 1: Ollama (simple prompt format)
+# File: ollama_request.txt
+# ==========================================
+
+http://localhost:11434/api/generate
+{
+    "model": "llama3.2",
+    "prompt": "$PROMPT$",
+    "stream": false
+}
+
+
+# ==========================================
+# EXAMPLE 2: Ollama with system prompt
+# File: ollama_chat_request.txt
+# ==========================================
+
+http://localhost:11434/api/chat
+{
+    "model": "llama3.2",
+    "messages": [
+        {"role": "system", "content": "$SYSTEM$"},
+        {"role": "user", "content": "$PROMPT$"}
+    ],
+    "stream": false
+}
+
+
+# ==========================================
+# EXAMPLE 3: OpenAI-compatible API
+# File: openai_request.txt
+# ==========================================
+
+https://api.openai.com/v1/chat/completions
+{
+    "model": "$MODEL$",
+    "messages": [
+        {"role": "user", "content": "$PROMPT$"}
+    ],
+    "temperature": $TEMPERATURE$,
+    "max_tokens": $MAX_TOKENS$
+}
+
+
+# ==========================================
+# EXAMPLE 4: Custom cloud model
+# File: custom_cloud_request.txt
+# ==========================================
+
+http://localhost:11434/api/generate
+{
+    "model": "gpt-oss:120b-cloud",
+    "prompt": "$PROMPT$"
+}
+
+
+# ==========================================
+# EXAMPLE 5: Groq API
+# File: groq_request.txt
+# ==========================================
+
+https://api.groq.com/openai/v1/chat/completions
+{
+    "model": "llama-3.1-70b-versatile",
+    "messages": [
+        {"role": "user", "content": "$PROMPT$"}
+    ],
+    "temperature": $TEMPERATURE$,
+    "max_tokens": $MAX_TOKENS$
+}
+
+
+# ==========================================
+# EXAMPLE 6: Together AI
+# File: together_request.txt
+# ==========================================
+
+https://api.together.xyz/v1/chat/completions
+{
+    "model": "meta-llama/Llama-3-70b-chat-hf",
+    "messages": [
+        {"role": "user", "content": "$PROMPT$"}
+    ],
+    "temperature": $TEMPERATURE$,
+    "max_tokens": $MAX_TOKENS$
+}
+
+
+# ==========================================
+# EXAMPLE 7: Local vLLM server
+# File: vllm_request.txt
+# ==========================================
+
+http://localhost:8000/v1/chat/completions
+{
+    "model": "meta-llama/Llama-2-7b-chat-hf",
+    "messages": [
+        {"role": "user", "content": "$PROMPT$"}
+    ],
+    "temperature": $TEMPERATURE$,
+    "max_tokens": $MAX_TOKENS$
+}
+
+
+# ==========================================
+# EXAMPLE 8: Simple chatbot (no model param)
+# File: chatbot_request.txt
+# ==========================================
+
+http://my-chatbot.com/api/chat
+{
+    "message": "$PROMPT$"
+}
+
+
+# ==========================================
+# EXAMPLE 9: HuggingFace Inference API
+# File: huggingface_request.txt
+# ==========================================
+
+https://api-inference.huggingface.co/models/meta-llama/Llama-2-7b-chat-hf
+{
+    "inputs": "$PROMPT$",
+    "parameters": {
+        "temperature": $TEMPERATURE$,
+        "max_new_tokens": $MAX_TOKENS$
+    }
+}
+
+
+# ==========================================
+# EXAMPLE 10: Anthropic Claude
+# File: anthropic_request.txt
+# ==========================================
+
+https://api.anthropic.com/v1/messages
+{
+    "model": "claude-3-sonnet-20240229",
+    "max_tokens": $MAX_TOKENS$,
+    "messages": [
+        {"role": "user", "content": "$PROMPT$"}
+    ]
+}
+
+
+# ==========================================
+# Usage:
+# ==========================================
+#
+# llm-fingerprinter test -r ollama_request.txt
+# llm-fingerprinter test -r groq_request.txt -k $GROQ_API_KEY
+# llm-fingerprinter identify -r openai_request.txt -k $OPENAI_API_KEY
