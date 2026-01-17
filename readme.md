@@ -34,19 +34,25 @@ python -c "import nltk; nltk.download('punkt_tab'); nltk.download('stopwords')"
 
 ## Quick Start
 
-### Ollama (Default)
+### Ollama
 
 ```bash
 # Idenitfy model and finetuning
 
-python3 cli.py identify --model some-model
+python3 cli.py identify -b ollama --model some-model 
 
 # Train your own classifier
-# Get Samples
+# Fingerprint the LLM
 python3 cli.py simulate --model llama3.2 --family llama
-# Train on the samples
+# Train on the Fingerprints
 python3 cli.py train
 
+```
+### Custom - Interact with any LLM via HTTP request
+
+```bash
+python3 cli.py identify -r ./custom_request.txt --api-key <API_KEY>
+# Example of custom request inside the example folder
 ```
 
 ### Ollama Cloud
@@ -92,7 +98,7 @@ python3 cli.py simulate -b custom -e http://your-api.com/v1 --model your-model -
 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
-| `--backend` | `-b` | `ollama` | Backend: `ollama`, `ollama-cloud`, `openai`,`deepseek`,`gemini` ,`custom`|
+| `--backend` | `-b` | `custom` | Backend: `ollama`, `ollama-cloud`, `openai`,`deepseek`,`gemini` ,`custom`|
 | `--endpoint` | `-e` | auto | API endpoint URL |
 | `--api-key` | `-k` | env var | API key |
 

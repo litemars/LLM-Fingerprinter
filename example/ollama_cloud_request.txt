@@ -1,0 +1,5 @@
+https://ollama.com/api/generate
+{
+    "model": "gpt-oss:20b",
+    "prompt": "$PROMPT$"
+}

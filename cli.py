@@ -20,9 +20,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.ollama_client import OllamaClient
 from src.openai_client import OpenAIClient, OpenAIAuthError
 from src.ollama_cloud_client import OllamaCloudClient, OllamaCloudAuthError
+from src.custom_client import CustomClient, CustomAuthError
 from src.deepseek_client import DeepSeekClient, DeepSeekAuthError
 from src.gemini_client import GeminiClient, GeminiAuthError
-from src.template_client import TemplateClient, TemplateAuthError
 from src.prompt_suite import PromptSuite
 from src.feature_extractor import FeatureExtractor
 from src.classifier import EnsembleClassifier, create_classifier
@@ -56,43 +56,40 @@ def get_default_endpoint(backend):
         "openai": config.OPENAI_DEFAULT_ENDPOINT,
         "deepseek": config.DEEPSEEK_DEFAULT_ENDPOINT,
         "gemini": config.GEMINI_DEFAULT_ENDPOINT,
-        "custom": "http://localhost:8000/v1",
-    }.get(backend, config.OLLAMA_DEFAULT_ENDPOINT)
+    }.get(backend, config.DEFAULT_BACKEND)
 
 
-def get_api_client(backend, endpoint, api_key = None):
+def get_api_client(backend, endpoint, api_key = None, request_file = None):
     if not api_key and backend in config.API_KEY_ENV_VARS:
         api_key = os.environ.get(config.API_KEY_ENV_VARS[backend])
     
     if backend == "ollama":
         return OllamaClient(endpoint=endpoint)
+      
     elif backend == "ollama-cloud":
         if not api_key:
-            raise click.ClickException("Ollama Cloud API key required")
+            raise click.ClickException("Ollama Cloud API key required. Set OLLAMA_CLOUD_API_KEY or use --api-key")
         return OllamaCloudClient(api_key=api_key, endpoint=endpoint)
     
     elif backend == "openai":
         if not api_key:
-            raise click.ClickException("OpenAI API key required")
+            raise click.ClickException("OpenAI API key required. Set OPENAI_API_KEY or use --api-key")
         return OpenAIClient(api_key=api_key, endpoint=endpoint)
     
     elif backend == "deepseek":
         if not api_key:
-            raise click.ClickException(
-                "DeepSeek API key required. Set DEEPSEEK_API_KEY or use --api-key"
-            )
+            raise click.ClickException("DeepSeek API key required. Set DEEPSEEK_API_KEY or use --api-key")
         return DeepSeekClient(api_key=api_key, endpoint=endpoint)
     
     elif backend == "gemini":
         if not api_key:
-            raise click.ClickException(
-                "Gemini API key required. Set GEMINI_API_KEY or use --api-key"
-            )
+            raise click.ClickException("Gemini API key required. Set GEMINI_API_KEY or use --api-key")
         return GeminiClient(api_key=api_key, endpoint=endpoint)
+    
     elif backend == "custom":
-        if not api_key:
-            raise click.ClickException("Custom API key required")
-        return TemplateClient(api_key=api_key, endpoint=endpoint)
+        if not request_file:
+            raise click.ClickException("Custom backend requires --request-file (-r)")
+        return CustomClient(request_file=request_file, api_key=api_key)
     
     raise click.ClickException(f"Unknown backend: {backend}")
 
@@ -134,10 +131,14 @@ def print_report(result: dict):
 
 
 def backend_options(f):
-    f = click.option('--backend', '-b', type=click.Choice(['ollama', 'ollama-cloud', 'openai', 'custom', 'gemini', 'deepseek']), 
-                     default='ollama', help='API backend')(f)
+    """Common backend options for all LLM commands."""
+    f = click.option('--backend', '-b', 
+                     type=click.Choice(['ollama', 'ollama-cloud', 'openai', 'custom', 'gemini', 'deepseek']), 
+                     default=config.DEFAULT_BACKEND, help='API backend')(f)
     f = click.option('--endpoint', '-e', default=None, help='API endpoint URL')(f)
     f = click.option('--api-key', '-k', default=None, help='API key')(f)
+    f = click.option('--request-file', '-r', default=None, type=click.Path(exists=True),
+                     help='[custom] Request template file')(f)
     return f
 
 
@@ -145,6 +146,28 @@ def backend_options(f):
 @click.option('--verbose', '-v', is_flag=True, help='Verbose output')
 @click.pass_context
 def cli(ctx, verbose):
+    """LLM Fingerprinting - Model Identification System.
+    
+    \b
+    Workflow:
+      1. simulate  - Fingerprint known models with --family labels
+      2. train     - Build classifier from fingerprints  
+      3. identify  - Classify unknown models
+    
+    \b
+    Backends:
+      ollama       - Local Ollama server (default)
+      ollama-cloud - Ollama Cloud API
+      openai       - OpenAI API
+      deepseek     - DeepSeek API
+      gemini       - Google Gemini API
+      custom       - Any API via request template file
+    
+    \b
+    Custom Backend Examples:
+      llm-fingerprinter identify -b custom -r ./request.txt
+      llm-fingerprinter identify -b custom -r ./request.txt -k my-api-key
+    """
     ctx.ensure_object(dict)
     ctx.obj['verbose'] = verbose
     ctx.obj['logger'] = setup_logging(verbose)
@@ -152,25 +175,46 @@ def cli(ctx, verbose):
 
 @cli.command()
 @backend_options
-@click.option('--model', required=True, help='Model name')
+@click.option('--model', '-m', default=None, help='Model name')
 @click.option('--repeats', default=1, type=int, help='Prompt repeats (default: 1)')
 @click.pass_context
-def identify(ctx, backend, endpoint, api_key, model, repeats):
+def identify(ctx, backend, endpoint, api_key, request_file, model, repeats):
+    """Identify model family using trained classifier.
+    
+    \b
+    Examples:
+      identify -b ollama --model llama3.2
+      identify -b openai --model gpt-4o-mini
+      identify -b custom -r ./request.txt
+      identify -b custom -r ./request.txt -k my-api-key
+    """
     print_header()
     logger = ctx.obj['logger']
-    endpoint = endpoint or get_default_endpoint(backend)
+    
+    # Validate options
+    if backend == "custom":
+        if not request_file:
+            raise click.ClickException("Custom backend requires --request-file (-r)")
+        click.echo(f"🔌 Backend: custom")
+        click.echo(f"📄 Request file: {request_file}")
+    else:
+        endpoint = endpoint or get_default_endpoint(backend)
+        click.echo(f"🔌 Backend: {backend}")
+        click.echo(f"🌐 Endpoint: {endpoint}")
 
     try:
-        client = get_api_client(backend, endpoint, api_key)
+        client = get_api_client(backend, endpoint, api_key, request_file)
         if not client._check_connectivity():
-            click.echo(click.style(f"❌ Cannot reach {backend} at {endpoint}", fg='red'))
+            click.echo(click.style(f"❌ Cannot connect to API", fg='red'))
             sys.exit(1)
+        click.echo("✅ Connected")
 
-        click.echo(f"🔧 Initializing ({backend})...")
+        click.echo(f"\n🔧 Initializing...")
         suite = PromptSuite()
         extractor = FeatureExtractor()
         classifier = EnsembleClassifier(config.MODEL_FAMILIES)
-        fingerprinter = LLMFingerprinter(endpoint, client, suite, extractor, classifier)
+        fingerprinter = LLMFingerprinter(endpoint if backend != "custom" else "custom", 
+                                         client, suite, extractor, classifier)
 
         classifier_path = config.MODEL_DIR / "classifier_model.joblib"
         if classifier_path.exists():
@@ -183,12 +227,13 @@ def identify(ctx, backend, endpoint, api_key, model, repeats):
             click.echo("   Run 'simulate' then 'train' first")
             sys.exit(1)
 
-        click.echo(f"\n📊 Fingerprinting {model}...")
+        model_display = model or "default"
+        click.echo(f"\n📊 Fingerprinting {model_display}...")
         result = fingerprinter.identify(model, repeats=repeats)
         print_report(result)
         click.echo("\n✅ Done!")
 
-    except (OpenAIAuthError, OllamaCloudAuthError, TemplateAuthError) as e:
+    except (OpenAIAuthError, OllamaCloudAuthError, DeepSeekAuthError, GeminiAuthError, CustomAuthError) as e:
         click.echo(click.style(f"❌ Auth failed: {e}", fg='red'))
         sys.exit(1)
     except Exception as e:
@@ -199,30 +244,52 @@ def identify(ctx, backend, endpoint, api_key, model, repeats):
 
 @cli.command()
 @backend_options
-@click.option('--model', required=True, help='Model name')
-@click.option('--family', required=True, type=click.Choice(list(config.MODEL_FAMILIES.keys())), help='Model family')
-@click.option('--num-sims', default=3, type=int, help='Number of simulations')
+@click.option('--model', '-m', default=None, help='Model name')
+@click.option('--family', '-f', required=True, type=click.Choice(list(config.MODEL_FAMILIES.keys())), help='Model family')
+@click.option('--num-sims', '-n', default=3, type=int, help='Number of simulations')
 @click.option('--repeats', default=2, type=int, help='Prompt repeats per simulation')
 @click.pass_context
-def simulate(ctx, backend, endpoint, api_key, model, family, num_sims, repeats):
+def simulate(ctx, backend, endpoint, api_key, request_file, model, family, num_sims, repeats):
+    """Run fingerprinting simulations for training.
+    
+    \b
+    Examples:
+      simulate -b ollama --model llama3.2 --family llama
+      simulate -b openai --model gpt-4o-mini --family gpt
+      simulate -b custom -r ./request.txt --family gpt
+      simulate -b custom -r ./request.txt -k my-api-key --family llama
+    """
     print_header()
     logger = ctx.obj['logger']
-    endpoint = endpoint or get_default_endpoint(backend)
+    
+    # Validate options
+    if backend == "custom":
+        if not request_file:
+            raise click.ClickException("Custom backend requires --request-file (-r)")
+        click.echo(f"🔌 Backend: custom")
+        click.echo(f"📄 Request file: {request_file}")
+    else:
+        endpoint = endpoint or get_default_endpoint(backend)
+        click.echo(f"🔌 Backend: {backend}")
+        click.echo(f"🌐 Endpoint: {endpoint}")
 
     try:
-        client = get_api_client(backend, endpoint, api_key)
+        client = get_api_client(backend, endpoint, api_key, request_file)
         if not client._check_connectivity():
-            click.echo(click.style(f"❌ Cannot reach {backend}", fg='red'))
+            click.echo(click.style(f"❌ Cannot connect to API", fg='red'))
             sys.exit(1)
+        click.echo("✅ Connected")
 
-        click.echo(f"🔧 Initializing ({backend})...")
+        click.echo(f"\n🔧 Initializing...")
         suite = PromptSuite()
         extractor = FeatureExtractor()
         classifier = EnsembleClassifier(config.MODEL_FAMILIES)
-        fingerprinter = LLMFingerprinter(endpoint, client, suite, extractor, classifier)
+        fingerprinter = LLMFingerprinter(endpoint if backend != "custom" else "custom",
+                                         client, suite, extractor, classifier)
         store = FingerprintStore(str(config.FINGERPRINTS_DIR))
 
-        click.echo(f"\n🔄 Running {num_sims} simulations for {model} ({family})...")
+        model_display = model or "default"
+        click.echo(f"\n🔄 Running {num_sims} simulations for {model_display} ({family})...")
         
         success_count = 0
         for sim_idx in range(num_sims):
@@ -242,7 +309,7 @@ def simulate(ctx, backend, endpoint, api_key, model, family, num_sims, repeats):
         click.echo(f"\n✅ Completed {success_count}/{num_sims} simulations")
         click.echo("   Next: Run 'train' to build classifier")
 
-    except (OpenAIAuthError, OllamaCloudAuthError, TemplateAuthError) as e:
+    except (OpenAIAuthError, OllamaCloudAuthError, DeepSeekAuthError, GeminiAuthError, CustomAuthError) as e:
         click.echo(click.style(f"❌ Auth failed: {e}", fg='red'))
         sys.exit(1)
     except Exception as e:
@@ -259,8 +326,10 @@ def simulate(ctx, backend, endpoint, api_key, model, family, num_sims, repeats):
               help='PCA components if --use-pca (default: 64)')
 @click.pass_context
 def train(ctx, augment, use_pca, pca_components):
-    """
-    Examples/Option:
+    """Train classifier from saved fingerprints.
+    
+    \b
+    Examples:
       train                    # Raw features (recommended)
       train --use-pca          # With PCA (64 components)
       train --use-pca --pca-components 32
@@ -323,13 +392,18 @@ def train(ctx, augment, use_pca, pca_components):
 @cli.command('list-models')
 @backend_options
 @click.pass_context
-def list_models(ctx, backend, endpoint, api_key):
-    """List available models."""
+def list_models(ctx, backend, endpoint, api_key, request_file):
+    """List available models on backend."""
     print_header()
+    
+    if backend == "custom":
+        click.echo("⚠️  list-models not supported for custom backend")
+        return
+    
     endpoint = endpoint or get_default_endpoint(backend)
 
     try:
-        client = get_api_client(backend, endpoint, api_key)
+        client = get_api_client(backend, endpoint, api_key, request_file)
         if not client._check_connectivity():
             click.echo(click.style(f"❌ Cannot reach {backend}", fg='red'))
             sys.exit(1)
@@ -394,11 +468,12 @@ def info():
     click.echo(f"  Total dims:   {config.TOTAL_FEATURE_DIM} (384 + 12 + 6)")
     
     click.echo(f"\n🔌 Backends:")
-    click.echo(f"  Ollama:       {config.OLLAMA_DEFAULT_ENDPOINT}")
-    click.echo(f"  Ollama Cloud: {config.OLLAMA_CLOUD_DEFAULT_ENDPOINT}")
-    click.echo(f"  OpenAI:       {config.OPENAI_DEFAULT_ENDPOINT}")
+    click.echo(f"  ollama:       {config.OLLAMA_DEFAULT_ENDPOINT}")
+    click.echo(f"  ollama-cloud: {config.OLLAMA_CLOUD_DEFAULT_ENDPOINT}")
+    click.echo(f"  openai:       {config.OPENAI_DEFAULT_ENDPOINT}")
     click.echo(f"  deepseek:     {config.DEEPSEEK_DEFAULT_ENDPOINT}")
     click.echo(f"  gemini:       {config.GEMINI_DEFAULT_ENDPOINT}")
+    click.echo(f"  custom:       Via request template file (-r)")
     
     click.echo(f"\n📋 Families: {', '.join(sorted(config.MODEL_FAMILIES.keys()))}")
     
@@ -428,29 +503,101 @@ def info():
 
 @cli.command()
 @backend_options
-@click.option('--model', required=True, help='Model name')
+@click.option('--model', '-m', default=None, help='Model name')
+@click.option('--prompt', '-p', default="Hello! How are you?", help='Test prompt')
+@click.pass_context
+def test(ctx, backend, endpoint, api_key, request_file, model, prompt):
+    """Test connection and generation with a backend.
+    
+    \b
+    Examples:
+      test -b ollama --model llama3.2
+      test -b openai --model gpt-4o-mini
+      test -b custom -r ./request.txt
+      test -b custom -r ./request.txt -k my-api-key
+    """
+    print_header()
+    
+    # Validate and show config
+    if backend == "custom":
+        if not request_file:
+            raise click.ClickException("Custom backend requires --request-file (-r)")
+        click.echo(f"🔌 Backend: custom")
+        click.echo(f"📄 Request file: {request_file}")
+    else:
+        endpoint = endpoint or get_default_endpoint(backend)
+        click.echo(f"🔌 Backend: {backend}")
+        click.echo(f"🌐 Endpoint: {endpoint}")
+    
+    click.echo(f"🤖 Model: {model or 'from template'}")
+    
+    try:
+        client = get_api_client(backend, endpoint, api_key, request_file)
+        
+        click.echo(f"\n🔍 Checking connectivity...")
+        if not client._check_connectivity():
+            click.echo(click.style(f"❌ Cannot connect to API", fg='red'))
+            sys.exit(1)
+        click.echo("✅ Connected")
+        
+        click.echo(f"\n💬 Testing generation...")
+        click.echo(f"   Prompt: {prompt[:50]}{'...' if len(prompt) > 50 else ''}")
+        
+        response = client.generate(prompt=prompt, model=model, max_tokens=100)
+        
+        click.echo(f"\n📝 Response:")
+        click.echo(f"   {response[:200]}{'...' if len(response) > 200 else ''}")
+        click.echo(f"\n✅ Test successful!")
+        
+    except Exception as e:
+        click.echo(click.style(f"❌ Error: {e}", fg='red'))
+        sys.exit(1)
+
+
+@cli.command()
+@backend_options
+@click.option('--model', '-m', default=None, help='Model name')
 @click.option('--repeats', default=1, type=int, help='Prompt repeats (default: 1)')
 @click.option('--output', type=click.Path(), help='Output directory')
 @click.pass_context
-def fingerprint(ctx, backend, endpoint, api_key, model, repeats, output):
-    """Generate fingerprint without classification."""
+def fingerprint(ctx, backend, endpoint, api_key, request_file, model, repeats, output):
+    """Generate fingerprint without classification.
+    
+    \b
+    Examples:
+      fingerprint -b ollama --model llama3.2
+      fingerprint -b custom -r ./request.txt --output ./my_fingerprints
+    """
     print_header()
     logger = ctx.obj['logger']
-    endpoint = endpoint or get_default_endpoint(backend)
+    
+    # Validate options
+    if backend == "custom":
+        if not request_file:
+            raise click.ClickException("Custom backend requires --request-file (-r)")
+        click.echo(f"🔌 Backend: custom")
+        click.echo(f"📄 Request file: {request_file}")
+    else:
+        endpoint = endpoint or get_default_endpoint(backend)
+        click.echo(f"🔌 Backend: {backend}")
+        click.echo(f"🌐 Endpoint: {endpoint}")
 
     try:
-        client = get_api_client(backend, endpoint, api_key)
+        client = get_api_client(backend, endpoint, api_key, request_file)
         if not client._check_connectivity():
-            click.echo(click.style(f"❌ Cannot reach {backend}", fg='red'))
+            click.echo(click.style(f"❌ Cannot connect to API", fg='red'))
             sys.exit(1)
+        click.echo("✅ Connected")
 
-        click.echo(f"🔧 Initializing ({backend})...")
+        click.echo(f"\n🔧 Initializing...")
         suite = PromptSuite()
         extractor = FeatureExtractor()
         classifier = EnsembleClassifier(config.MODEL_FAMILIES)
-        fingerprinter = LLMFingerprinter(endpoint, client, suite, extractor, classifier)
+        fingerprinter = LLMFingerprinter(endpoint if backend != "custom" else "custom",
+                                         client, suite, extractor, classifier)
 
-        click.echo(f"\n📊 Fingerprinting {model}...")
+        model_display = model or "default"
+        click.echo(f"\n📊 Fingerprinting {model_display}...")
         fp = fingerprinter.fingerprint_model(model, repeats=repeats)
 
         if fp is None:
@@ -464,7 +611,7 @@ def fingerprint(ctx, backend, endpoint, api_key, model, repeats, output):
 
         if output:
             store = FingerprintStore(output)
-            path = store.save_fingerprint(fp, model)
+            path = store.save_fingerprint(fp, model_display)
             click.echo(f"\n📁 Saved: {path}")
 
     except Exception as e:

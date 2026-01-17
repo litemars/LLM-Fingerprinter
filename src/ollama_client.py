@@ -42,11 +42,11 @@ class OllamaClient:
         
         self._last_health_check = None
         self._health_check_interval = 30  # seconds
-        self._is_healthy: bool = False
+        self._is_healthy = False
         
         logger.info(f"Initialized OllamaClient for {endpoint}")
     
-    def _check_connectivity(self, force: bool = False) -> bool:
+    def _check_connectivity(self, force = False):
         now = time.time()
         
         # Use cached result if recent

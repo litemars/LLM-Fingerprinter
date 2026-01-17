@@ -163,7 +163,7 @@ class EnsembleClassifier:
             
             # Preprocess (same pipeline as training)
             fp_processed = self._preprocess(fingerprint, fit=False)
-
+            logger.debug(f"Processed fingerprint shape: {fp_processed.shape}")
             # Get predictions from each classifier
             rf_pred = self.rf.predict_proba(fp_processed)[0]
             svm_pred = self.svm.predict_proba(fp_processed)[0]
@@ -172,11 +172,14 @@ class EnsembleClassifier:
             # MLP can be removed
             # logger.info(f"Result RF {rf_pred}, svm {svm_pred} and mlp {mlp_pred}")
             # Weighted ensemble
+            logger.debug(f"RF prediction: {rf_pred}")
+            logger.debug(f"SVM prediction: {svm_pred}")
+            logger.debug(f"MLP prediction: {mlp_pred}")
             weights = [0.45, 0.45, 0.10]  # RF, SVM, MLP
             ensemble_pred = (weights[0] * rf_pred +
                            weights[1] * svm_pred +
                            weights[2] * mlp_pred)
-
+            logger.debug(f"Ensemble prediction: {ensemble_pred}")
             top_idx = np.argmax(ensemble_pred)
             
             if top_idx not in self.families_inv:

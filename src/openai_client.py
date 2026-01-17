@@ -75,7 +75,7 @@ class OpenAIClient:
         
         logger.info(f"Initialized OpenAIClient for {endpoint}")
     
-    def _check_connectivity(self, force: bool = False) -> bool:
+    def _check_connectivity(self, force = False):
         """
         Check if API is reachable.
         

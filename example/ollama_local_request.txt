@@ -1,0 +1,5 @@
+http://localhost:11434/api/generate
+{
+  "model": "gemma3:1b",
+  "prompt": "$PROMPT$"
+}

@@ -66,11 +66,11 @@ class OllamaCloudClient:
         # Cache connectivity status
         self._last_health_check = None
         self._health_check_interval = 30
-        self._is_healthy: bool = False
+        self._is_healthy = False
         
         logger.info(f"Initialized OllamaCloudClient for {endpoint}")
     
-    def _check_connectivity(self, force: bool = False) -> bool:
+    def _check_connectivity(self, force = False):
 
         now = time.time()
         
@@ -136,8 +136,7 @@ class OllamaCloudClient:
             "prompt": prompt,
             "stream": False,
             "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens,
+                "temperature": temperature
             }
         }
         
