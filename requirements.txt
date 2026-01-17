@@ -16,3 +16,8 @@ click>=8.0.0
 
 # Model persistence
 joblib>=1.1.0
+
+# LLM Clients
+openai>=1.0.0
+google-genai>=0.1.0
+httpx>=0.24.0
