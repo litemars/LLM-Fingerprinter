@@ -12,13 +12,13 @@ setup(
     description="Black-box LLM fingerprinting system for model identification",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    author="Your Name",
+    author="litemars",
     packages=find_packages(),
     include_package_data=True,
     python_requires=">=3.8",
     entry_points={
         "console_scripts": [
-            "llmfingerprinter=cli:cli",
+            "llm-fingerprinter=cli:cli",
         ],
     },
     install_requires=[
