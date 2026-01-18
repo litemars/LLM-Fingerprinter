@@ -1,9 +1,8 @@
 import logging
 import time
-from openai import OpenAI
-import openai as openai_module
 
 logger = logging.getLogger(__name__)
+
 
 class OpenAIError(Exception):
     """Base exception for OpenAI client errors."""
@@ -38,10 +37,10 @@ class OpenAIClient:
     
     def __init__(self, 
                  api_key,
-                 endpoint = "https://api.openai.com/v1",
-                 timeout = 60,
-                 max_retries = 3,
-                 organization = None):
+                 endpoint="https://api.openai.com/v1",
+                 timeout=60,
+                 max_retries=3,
+                 organization=None):
         """
         Initialize OpenAI client.
         
@@ -52,6 +51,17 @@ class OpenAIClient:
             max_retries: Maximum number of retries for failed requests
             organization: Optional organization ID for OpenAI
         """
+        # Lazy import - only import when class is instantiated
+        try:
+            from openai import OpenAI
+            import openai as openai_module
+        except ImportError as e:
+            raise ImportError(
+                "openai package is required. Install with: pip install openai"
+            ) from e
+        
+        # Store the module reference as instance attribute for use in other methods
+        self._openai_module = openai_module
         
         self.api_key = api_key
         self.endpoint = endpoint.rstrip("/")
@@ -75,7 +85,7 @@ class OpenAIClient:
         
         logger.info(f"Initialized OpenAIClient for {endpoint}")
     
-    def _check_connectivity(self, force = False):
+    def _check_connectivity(self, force=False):
         """
         Check if API is reachable.
         
@@ -98,17 +108,17 @@ class OpenAIClient:
             self._last_health_check = now
             return True
             
-        except openai_module.AuthenticationError:
+        except self._openai_module.AuthenticationError:
             logger.warning("API reachable but authentication failed - check API key")
             self._is_healthy = False
             self._last_health_check = now
             return False
-        except openai_module.PermissionDeniedError:
+        except self._openai_module.PermissionDeniedError:
             logger.warning("API reachable but access forbidden - check permissions")
             self._is_healthy = False
             self._last_health_check = now
             return False
-        except openai_module.APIConnectionError as e:
+        except self._openai_module.APIConnectionError as e:
             logger.error(f"Connection error to API at {self.endpoint}: {e}")
             self._is_healthy = False
             self._last_health_check = now
@@ -119,7 +129,7 @@ class OpenAIClient:
             self._last_health_check = now
             return False
     
-    def generate(self, model, prompt, temperature = 0.7, max_tokens = 512, system = None) -> str:
+    def generate(self, model, prompt, temperature=0.7, max_tokens=512, system=None):
         """
         Generate completion from model using chat completions API.
         
@@ -164,18 +174,18 @@ class OpenAIClient:
             logger.debug(f"Generated {len(text)} chars, {completion_tokens} tokens in {elapsed:.2f}s")
             return text
             
-        except openai_module.AuthenticationError:
+        except self._openai_module.AuthenticationError:
             raise OpenAIAuthError("Invalid API key")
-        except openai_module.PermissionDeniedError:
+        except self._openai_module.PermissionDeniedError:
             raise OpenAIAuthError("Access forbidden - check API key permissions")
-        except openai_module.NotFoundError:
+        except self._openai_module.NotFoundError:
             raise OpenAIGenerationError(f"Model '{model}' not found")
-        except openai_module.RateLimitError:
+        except self._openai_module.RateLimitError:
             raise OpenAIGenerationError("Rate limit exceeded - please wait and retry")
-        except openai_module.APIConnectionError as e:
+        except self._openai_module.APIConnectionError as e:
             logger.error(f"Connection error to API: {e}")
             raise OpenAIConnectionError(f"Cannot connect to API at {self.endpoint}")
-        except openai_module.APITimeoutError:
+        except self._openai_module.APITimeoutError:
             logger.warning(f"Timeout querying {model} after {self.timeout}s")
             raise OpenAIConnectionError(f"Request timeout after {self.timeout}s")
         except OpenAIError:
@@ -198,10 +208,10 @@ class OpenAIClient:
             logger.info(f"Found {len(models)} models on API")
             return models
             
-        except openai_module.AuthenticationError:
+        except self._openai_module.AuthenticationError:
             logger.error("Authentication failed - check API key")
             return []
-        except openai_module.APIConnectionError:
+        except self._openai_module.APIConnectionError:
             logger.error(f"Cannot connect to API at {self.endpoint}")
             return []
         except Exception as e:
@@ -226,7 +236,7 @@ class OpenAIClient:
                 "created": model_obj.created,
                 "owned_by": model_obj.owned_by,
             }
-        except openai_module.NotFoundError:
+        except self._openai_module.NotFoundError:
             logger.warning(f"Model '{model}' not found")
             return None
         except Exception as e:

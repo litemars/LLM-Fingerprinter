@@ -31,7 +31,7 @@ import logging
 import time
 import json
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Dict, List
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,6 @@ class CustomAuthError(CustomClientError):
 
 
 class CustomClient:
-    """Flexible client that uses a request template file."""
     
     def __init__(self,
                  request_file: str = None,
@@ -122,15 +121,15 @@ class CustomClient:
             else:
                 self.session.headers[auth_header] = api_key
         
-        self._last_health_check: Optional[float] = None
+        self._last_health_check = None
         self._health_check_interval = 30
         self._is_healthy = False
         
         if self.url:
             logger.info(f"Initialized CustomClient for {self.url}")
     
-    def _parse_request_file(self, request_file: str) -> None:
-        """Parse request file to extract URL and payload template."""
+    def _parse_request_file(self, request_file):
+
         path = Path(request_file)
         
         if not path.exists():
@@ -171,10 +170,10 @@ class CustomClient:
         
         logger.debug(f"Parsed request file: URL={self.url}")
     
-    def _build_payload(self, prompt: str, model: str = None, 
-                       temperature: float = None, max_tokens: int = None,
-                       system: str = None) -> Dict[str, Any]:
-        """Build payload by replacing placeholders in template."""
+    def _build_payload(self, prompt, model = None, 
+                       temperature = None, max_tokens = None,
+                       system = None):
+
         if not self.payload_template:
             raise CustomClientError("No payload template configured")
         
@@ -195,8 +194,7 @@ class CustomClient:
             logger.error(f"Failed to parse payload: {payload_str[:200]}")
             raise CustomGenerationError(f"Invalid payload after substitution: {e}")
     
-    def _extract_response_text(self, data: dict) -> str:
-        """Extract text from a single response object."""
+    def _extract_response_text(self, data):
         
         # Check for empty/loading responses
         if isinstance(data, dict):
@@ -279,17 +277,7 @@ class CustomClient:
         
         return ""
     
-    def _parse_streaming_response(self, response_text: str) -> str:
-        """Parse streaming response (multiple JSON objects concatenated).
-        
-        Handles responses like:
-        {"response": "Hello"}{"response": " world"}{"response": "!", "done": true}
-        
-        Or newline-delimited:
-        {"response": "Hello"}
-        {"response": " world"}
-        {"response": "!", "done": true}
-        """
+    def _parse_streaming_response(self, response_text):
         full_text = []
         
         # Try to split by newlines first
@@ -314,11 +302,8 @@ class CustomClient:
         
         return ''.join(full_text)
     
-    def _split_json_objects(self, text: str) -> List[str]:
-        """Split a string containing multiple JSON objects.
-        
-        Handles: '{"a":1}{"b":2}' -> ['{"a":1}', '{"b":2}']
-        """
+    def _split_json_objects(self, text: str):
+
         objects = []
         depth = 0
         start = 0
@@ -352,8 +337,8 @@ class CustomClient:
         
         return objects
     
-    def _check_connectivity(self, force: bool = False) -> bool:
-        """Check if API is reachable."""
+    def _check_connectivity(self, force: bool = False):
+
         now = time.time()
         
         if not force and self._last_health_check is not None:
@@ -393,21 +378,16 @@ class CustomClient:
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception_type((requests.Timeout, requests.ConnectionError))
     )
-    def generate(self, prompt: str = "", model: str = None,
-                 temperature: float = None, max_tokens: int = None,
-                 system: str = None) -> str:
-        """
-        Generate completion using the request template.
-        
+    def generate(self, prompt = "", model = None,
+                 temperature = None, max_tokens = None,
+                 system = None):
+        """        
         Args:
             prompt: User prompt (replaces $PROMPT$ in template)
             model: Model name (replaces $MODEL$ in template)
             temperature: Temperature (replaces $TEMPERATURE$ in template)
             max_tokens: Max tokens (replaces $MAX_TOKENS$ in template)
             system: System prompt (replaces $SYSTEM$ in template)
-        
-        Returns:
-            Generated text
         """
         logger.debug(f"Generating with prompt length {model}")
         if not self.url:
@@ -470,7 +450,7 @@ class CustomClient:
             logger.error(f"Unexpected error: {e}")
             raise CustomGenerationError(f"Generation failed: {e}")
     
-    def _extract_error_message(self, response: requests.Response) -> str:
+    def _extract_error_message(self, response: requests.Response):
         """Extract error message from response."""
         try:
             error_json = response.json()
@@ -487,7 +467,7 @@ class CustomClient:
         except:
             return response.text[:200] if response.text else "Unknown error"
     
-    def list_models(self) -> List[str]:
+    def list_models(self):
         """List models (not supported for template-based client)."""
         logger.warning("list_models not supported for template-based custom client")
         return []

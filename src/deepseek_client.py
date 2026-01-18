@@ -1,7 +1,5 @@
 import logging
 import time
-from openai import OpenAI
-import openai as openai_module
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +40,17 @@ class DeepSeekClient:
             timeout: Request timeout in seconds
             max_retries: Maximum number of retries for failed requests
         """
+        # Lazy import - only import when class is instantiated
+        try:
+            from openai import OpenAI
+            import openai as openai_module
+        except ImportError as e:
+            raise ImportError(
+                "openai package is required. Install with: pip install openai"
+            ) from e
+        
+        # Store the module reference as instance attribute for use in other methods
+        self._openai_module = openai_module
         
         self.api_key = api_key
         self.endpoint = endpoint.rstrip("/")
@@ -63,7 +72,7 @@ class DeepSeekClient:
         
         logger.info(f"Initialized DeepSeekClient for {self.endpoint}")
     
-    def _check_connectivity(self, force = False):
+    def _check_connectivity(self, force=False):
         """
         Check if API is reachable.
         
@@ -86,17 +95,17 @@ class DeepSeekClient:
             self._last_health_check = now
             return True
             
-        except openai_module.AuthenticationError:
+        except self._openai_module.AuthenticationError:
             logger.warning("API reachable but authentication failed - check API key")
             self._is_healthy = False
             self._last_health_check = now
             return False
-        except openai_module.PermissionDeniedError:
+        except self._openai_module.PermissionDeniedError:
             logger.warning("API reachable but access forbidden - check permissions")
             self._is_healthy = False
             self._last_health_check = now
             return False
-        except openai_module.APIConnectionError as e:
+        except self._openai_module.APIConnectionError as e:
             logger.error(f"Connection error to API at {self.endpoint}: {e}")
             self._is_healthy = False
             self._last_health_check = now
@@ -107,7 +116,7 @@ class DeepSeekClient:
             self._last_health_check = now
             return False
     
-    def generate(self, model, prompt, system = None):
+    def generate(self, model, prompt, system=None):
         """
         Generate completion from model.
         
@@ -149,18 +158,18 @@ class DeepSeekClient:
             logger.debug(f"Generated {len(text)} chars, {completion_tokens} tokens in {elapsed:.2f}s")
             return text
             
-        except openai_module.AuthenticationError:
+        except self._openai_module.AuthenticationError:
             raise DeepSeekAuthError("Invalid API key")
-        except openai_module.PermissionDeniedError:
+        except self._openai_module.PermissionDeniedError:
             raise DeepSeekAuthError("Access forbidden - check API key permissions")
-        except openai_module.NotFoundError:
+        except self._openai_module.NotFoundError:
             raise DeepSeekGenerationError(f"Model '{model}' not found")
-        except openai_module.RateLimitError:
+        except self._openai_module.RateLimitError:
             raise DeepSeekGenerationError("Rate limit exceeded - please wait and retry")
-        except openai_module.APIConnectionError as e:
+        except self._openai_module.APIConnectionError as e:
             logger.error(f"Connection error to API: {e}")
             raise DeepSeekConnectionError(f"Cannot connect to API at {self.endpoint}")
-        except openai_module.APITimeoutError:
+        except self._openai_module.APITimeoutError:
             logger.warning(f"Timeout querying {model} after {self.timeout}s")
             raise DeepSeekConnectionError(f"Request timeout after {self.timeout}s")
         except DeepSeekError:
@@ -183,10 +192,10 @@ class DeepSeekClient:
             logger.info(f"Found {len(models)} models on DeepSeek API")
             return models
             
-        except openai_module.AuthenticationError:
+        except self._openai_module.AuthenticationError:
             logger.error("Authentication failed - check API key")
             return []
-        except openai_module.APIConnectionError:
+        except self._openai_module.APIConnectionError:
             logger.error(f"Cannot connect to API at {self.endpoint}")
             return []
         except Exception as e:
@@ -212,7 +221,7 @@ class DeepSeekClient:
                 "created": getattr(model_obj, 'created', None),
                 "owned_by": getattr(model_obj, 'owned_by', 'deepseek'),
             }
-        except openai_module.NotFoundError:
+        except self._openai_module.NotFoundError:
             logger.warning(f"Model '{model}' not found")
             return None
         except Exception as e:

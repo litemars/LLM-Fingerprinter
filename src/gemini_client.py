@@ -1,7 +1,5 @@
 import logging
 import time
-from google import genai
-from google.genai import types
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +28,9 @@ class GeminiClient:
     
     def __init__(self, 
                  api_key,
-                 endpoint = None,  # Not used, kept for API compatibility
-                 timeout = 60,
-                 max_retries = 3):
+                 endpoint=None,  # Not used, kept for API compatibility
+                 timeout=60,
+                 max_retries=3):
         """
         Initialize Gemini client.
         
@@ -42,6 +40,19 @@ class GeminiClient:
             timeout: Request timeout in seconds
             max_retries: Maximum number of retries for failed requests
         """
+        # Lazy import - only import when class is instantiated
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError as e:
+            raise ImportError(
+                "google-genai package is required. Install with: pip install google-genai"
+            ) from e
+        
+        # Store the module references as instance attributes
+        self._genai = genai
+        self._types = types
+        
         self.api_key = api_key
         self.timeout = timeout
         self.max_retries = max_retries
@@ -56,7 +67,7 @@ class GeminiClient:
         
         logger.info("Initialized GeminiClient with google-genai SDK")
     
-    def _check_connectivity(self, force = False):
+    def _check_connectivity(self, force=False):
         now = time.time()
         
         if not force and self._last_health_check is not None:
@@ -83,8 +94,8 @@ class GeminiClient:
             self._last_health_check = now
             return False
     
-    def generate(self, model, prompt, temperature = 0.7,
-                 max_tokens = 512, system = None):
+    def generate(self, model, prompt, temperature=0.7,
+                 max_tokens=512, system=None):
         """
         Generate completion from model.
         
@@ -98,8 +109,8 @@ class GeminiClient:
         start = time.time()
         
         try:
-            # Build generation config
-            config = types.GenerateContentConfig(
+            # Build generation config using stored types reference
+            config = self._types.GenerateContentConfig(
                 temperature=temperature,
                 max_output_tokens=max_tokens,
             )

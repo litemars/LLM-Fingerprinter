@@ -56,7 +56,7 @@ REQUEST_TIMEOUT = 60
 AUGMENTATION_SAMPLES_PER_ORIGINAL = 5
 
 # Logging
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "DEBUG")
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # Ollama client settings (local)

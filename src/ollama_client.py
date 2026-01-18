@@ -154,7 +154,7 @@ class OllamaClient:
             logger.error(f"Error listing models: {e}")
             return []
     
-    def pull_model(self, model: str, stream_progress: bool = True) -> bool:
+    def pull_model(self, model: str, stream_progress: bool = True):
         try:
             url = f"{self.endpoint}/api/pull"
             response = self.session.post(

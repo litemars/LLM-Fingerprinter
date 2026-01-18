@@ -159,7 +159,7 @@ class FingerprintStore:
             logger.error(f"Failed to delete {filepath}: {e}")
             return False
 
-    def count_by_family(self) -> Dict[str, int]:
+    def count_by_family(self):
         """Count fingerprints per family."""
         counts = {}
         

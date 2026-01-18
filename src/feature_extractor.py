@@ -37,7 +37,7 @@ except ImportError:
     logger.warning("NLTK not available, using basic tokenization")
 
 
-def _safe_sent_tokenize(text: str) -> list:
+def _safe_sent_tokenize(text):
     """Tokenize text into sentences with fallback."""
     if _NLTK_AVAILABLE:
         try:
@@ -50,7 +50,7 @@ def _safe_sent_tokenize(text: str) -> list:
     return [s.strip() for s in sentences if s.strip()]
 
 
-def _safe_word_tokenize(text: str) -> list:
+def _safe_word_tokenize(text: str):
     """Tokenize text into words with fallback."""
     if _NLTK_AVAILABLE:
         try:
@@ -62,7 +62,7 @@ def _safe_word_tokenize(text: str) -> list:
     return re.findall(r'\b\w+\b', text.lower())
 
 
-def _get_stopwords() -> set:
+def _get_stopwords():
     """Get English stopwords with fallback."""
     if _NLTK_AVAILABLE:
         try:
@@ -127,11 +127,11 @@ class FeatureExtractor:
         
         return all_features
     
-    def get_feature_dim(self) -> int:
+    def get_feature_dim(self):
 
         return self.embedding_dim + self.LINGUISTIC_DIM + self.BEHAVIORAL_DIM
     
-    def _embedding_features(self, response: str) -> np.ndarray:
+    def _embedding_features(self, response: str):
         try:
             embedding = self.embedding_model.encode(response, convert_to_numpy=True)
             return embedding.astype(np.float32)
@@ -139,7 +139,7 @@ class FeatureExtractor:
             logger.error(f"Embedding extraction failed: {e}")
             return np.zeros(self.embedding_dim, dtype=np.float32)
     
-    def _linguistic_features(self, response: str) -> np.ndarray:
+    def _linguistic_features(self, response: str):
         """
         Extract linguistic features (12-dim).
         
@@ -237,7 +237,7 @@ class FeatureExtractor:
         
         return np.array(features, dtype=np.float32)
     
-    def _behavioral_features(self, prompt: str, response: str) -> np.ndarray:
+    def _behavioral_features(self, prompt: str, response: str):
         """
         Extract behavioral features (6-dim).
         
