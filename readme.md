@@ -20,7 +20,7 @@ You can find an *already* NLP trained model in the `model` directory.
 | `openai` | OpenAI API (or compatible) | ✅ `OPENAI_API_KEY` |
 | `gemini` | Gemini API (or compatible) | ✅ `GEMINI_API_KEY` |
 | `deepseek` | Deepseek API (or compatible) | ✅ `DEEPSEEK_API_KEY` |
-| `custom` | Custom API (template-based) | ✅ `CUSTOM_API_KEY` |
+| `custom` | Custom HTTP request | ✅ `CUSTOM_API_KEY` |
 
 ## Installation
 
