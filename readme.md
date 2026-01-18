@@ -2,7 +2,7 @@
 
 A black-box fingerprinting system that identifies the underlying LLM model family (GPT, LLaMA, Mistral, etc.) by analyzing response patterns across 75 discriminative prompts. The system can identify fine-tuned models as well, tracing them back to their foundational base model.
 
-**Disclaimer: check the config.py to see all the model families that can be identify** 
+**Note: Check config.py to see all identifiable model families** 
 
 You can find an *already* NLP trained model in the `model` directory.
 
