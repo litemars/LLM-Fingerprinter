@@ -92,12 +92,12 @@ class LLMFingerprinter:
                     })
                     
                     # Debug logging (optional)
-                    debug_dir = f"./fingerprints/{model_name}"
-                    if not os.path.exists(debug_dir):
-                        os.makedirs(debug_dir)
-                    with open(f"{debug_dir}/debug.txt", "a") as debug_file:
-                        debug_file.write(f"PROMPT: {prompt}\n")
-                        debug_file.write(f"RESPONSE: {response}\n\n")
+                    # debug_dir = f"./fingerprints/{model_name}"
+                    # if not os.path.exists(debug_dir):
+                    #    os.makedirs(debug_dir)
+                    # with open(f"{debug_dir}/debug.txt", "a") as debug_file:
+                    #    debug_file.write(f"PROMPT: {prompt}\n")
+                    #    debug_file.write(f"RESPONSE: {response}\n\n")
                     
                     # Extract features
                     features = self.extractor.extract(prompt, response)
@@ -268,61 +268,3 @@ class LLMFingerprinter:
 
         logger.info(f"Identified as {family} ({confidence*100:.1f}% confidence)")
         return result
-
-    def compare_fingerprints(self, fp1, fp2):
-        """
-        Compare two fingerprints and compute similarity metrics.
-        
-        Args:
-            fp1: First fingerprint dict
-            fp2: Second fingerprint dict
-            
-        Returns:
-            Dict with similarity metrics
-        """
-        v1 = fp1.get('vector')
-        v2 = fp2.get('vector')
-        
-        if v1 is None or v2 is None:
-            return {'error': 'Missing fingerprint vectors'}
-        
-        # Ensure same dimensions
-        if v1.shape != v2.shape:
-            return {'error': f'Dimension mismatch: {v1.shape} vs {v2.shape}'}
-        
-        # Compute metrics
-        
-        cosine_sim = 1 - cosine(v1, v2)
-        euclidean_dist = euclidean(v1, v2)
-        
-        # Normalized euclidean (0-1 scale)
-        max_dist = np.sqrt(2 * len(v1))  # Max possible distance for unit vectors
-        normalized_euclidean = euclidean_dist / max_dist
-        
-        return {
-            'cosine_similarity': round(float(cosine_sim), 4),
-            'euclidean_distance': round(float(euclidean_dist), 4),
-            'normalized_distance': round(float(normalized_euclidean), 4),
-            'model1': fp1.get('model', 'unknown'),
-            'model2': fp2.get('model', 'unknown'),
-        }
-
-    def batch_identify(self, model_names, repeats = 1):
-        """
-        Identify multiple models.
-        
-        Args:
-            model_names: List of model names to identify
-            repeats: Number of prompt repeats per model
-            
-        Returns:
-            List of identification results
-        """
-        results = []
-        
-        for i, model in enumerate(model_names):
-            logger.info(f"Identifying model {i+1}/{len(model_names)}: {model}")
-            result = self.identify(model, repeats=repeats)
-            results.append(result)
-        
-        return results
