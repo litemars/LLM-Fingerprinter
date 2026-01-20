@@ -6,10 +6,7 @@ A black-box fingerprinting system that identifies the underlying LLM model famil
 
 You can find an *already* NLP trained model in the `model` directory.
 
-<div style="gap: 70px;">
-    <img src="img/gemma.png" width="300" height="300" style="margin-right: 100px;">
-    <img src="img/gpt.png" width="300" height="300">
-</div>
+![Gemma](img/gemma.png) ![GPT](img/gpt.png)
 
 ## Supported Backends
 
@@ -25,10 +22,12 @@ You can find an *already* NLP trained model in the `model` directory.
 ## Installation
 
 ```bash
-cd llm_fingerprint
 pip install -r requirements.txt
 
-# Optional
+# Or install as a package
+pip3 install -e .
+
+# Optional: Download NLTK data for text processing
 python -c "import nltk; nltk.download('punkt_tab'); nltk.download('stopwords')"
 ```
 
@@ -37,21 +36,21 @@ python -c "import nltk; nltk.download('punkt_tab'); nltk.download('stopwords')"
 ### Ollama
 
 ```bash
-# Idenitfy model and finetuning
+# Identify model and fine-tuning
 
-python3 cli.py identify -b ollama --model some-model 
+llm-fingerprinter identify -b ollama --model some-model 
 
 # Train your own classifier
 # Fingerprint the LLM
-python3 cli.py simulate --model llama3.2 --family llama
+llm-fingerprinter simulate --model llama3.2 --family llama
 # Train on the Fingerprints
-python3 cli.py train
+llm-fingerprinter train
 
 ```
 ### Custom - Interact with any LLM via HTTP request
 
 ```bash
-python3 cli.py identify -r ./custom_request.txt --api-key <API_KEY>
+llm-fingerprinter identify -r ./custom_request.txt --api-key <API_KEY>
 # Example of custom request inside the example folder
 ```
 
@@ -59,35 +58,35 @@ python3 cli.py identify -r ./custom_request.txt --api-key <API_KEY>
 
 ```bash
 export OLLAMA_CLOUD_API_KEY="your-key"
-python3 cli.py simulate -b ollama-cloud --model llama3.2 --family llama
+llm-fingerprinter simulate -b ollama-cloud --model llama3.2 --family llama
 ```
 
 ### OpenAI
 
 ```bash
 export OPENAI_API_KEY="your-key"
-python3 cli.py simulate -b openai --model gpt-4 --family gpt
+llm-fingerprinter simulate -b openai --model gpt-4 --family gpt
 ```
 
 ### Gemini
 
 ```bash
 export GEMINI_API_KEY="your-key"
-python3 cli.py simulate -b gemini --model gemini-2.5-pro --family gpt
+llm-fingerprinter simulate -b gemini --model gemini-2.5-pro --family gpt
 ```
 
 ### Deepseek
 
 ```bash
 export DEEPSEEK_API_KEY="your-key"
-python3 cli.py simulate -b deepseek --model deepseek-v3.2 --family deepseek
+llm-fingerprinter simulate -b deepseek --model deepseek-v3.2 --family deepseek
 ```
 
 ### Custom API
 
 ```bash
 export CUSTOM_API_KEY="your-key"
-python3 cli.py simulate -b custom -e http://your-api.com/v1 --model your-model --family llama
+llm-fingerprinter simulate -b custom -e http://your-api.com/v1 --model your-model --family llama
 ```
 
 ---
@@ -107,7 +106,7 @@ python3 cli.py simulate -b custom -e http://your-api.com/v1 --model your-model -
 Run fingerprinting simulations for training data.
 
 ```bash
-python -m llm_fingerprint.cli simulate [OPTIONS]
+llm-fingerprinter simulate [OPTIONS]
 ```
 
 | Option | Default | Description |
@@ -120,16 +119,16 @@ python -m llm_fingerprint.cli simulate [OPTIONS]
 **Examples:**
 ```bash
 # Ollama local
-python -m llm_fingerprint.cli simulate --model llama3.2 --family llama
+llm-fingerprinter simulate --model llama3.2 --family llama
 
 # Ollama Cloud
-python -m llm_fingerprint.cli simulate -b ollama-cloud --model llama3.2 --family llama
+llm-fingerprinter simulate -b ollama-cloud --model llama3.2 --family llama
 
 # OpenAI
-python3 cli.py simulate -b openai --model gpt-4 --family gpt --num-sims 5
+llm-fingerprinter simulate -b openai --model gpt-4 --family gpt --num-sims 5
 
 # Custom endpoint
-python3 cli.py simulate -b openai -e https://api.groq.com/openai/v1 -k $GROQ_KEY --model llama-3.1-70b --family llama
+llm-fingerprinter simulate -b openai -e https://api.groq.com/openai/v1 -k $GROQ_KEY --model llama-3.1-70b --family llama
 ```
 
 ### `train`
@@ -137,7 +136,7 @@ python3 cli.py simulate -b openai -e https://api.groq.com/openai/v1 -k $GROQ_KEY
 Train classifier from saved fingerprints.
 
 ```bash
-python3 cli.py train [--augment/--no-augment]
+llm-fingerprinter train [--augment/--no-augment]
 ```
 
 ### `identify`
@@ -145,7 +144,7 @@ python3 cli.py train [--augment/--no-augment]
 Identify model family using trained classifier.
 
 ```bash
-python3 cli.py identify --model <model-name> [-b <backend>]
+llm-fingerprinter identify --model <model-name> [-b <backend>]
 ```
 
 # Other commands
@@ -154,7 +153,7 @@ python3 cli.py identify --model <model-name> [-b <backend>]
 List available models on the API.
 
 ```bash
-python3 cli.py list-models [-b <backend>]
+llm-fingerprinter list-models [-b <backend>]
 ```
 
 ### `list-fingerprints`
@@ -162,7 +161,7 @@ python3 cli.py list-models [-b <backend>]
 List saved fingerprints by family.
 
 ```bash
-python3 cli.py list-fingerprints
+llm-fingerprinter list-fingerprints
 ```
 
 ### `info`
@@ -170,7 +169,7 @@ python3 cli.py list-fingerprints
 Show configuration and status.
 
 ```bash
-python3 cli.py info
+llm-fingerprinter info
 ```
 
 ---
@@ -189,10 +188,20 @@ python3 cli.py info
 
 ## How It Works
 
-1. **75 Prompts** across 3 layers (stylistic, behavioral, discriminative)
+1. **75 Prompts** across 3 layers:
+   - *Stylistic*: Analyze writing style and formatting preferences
+   - *Behavioral*: Assess response patterns and decision-making behavior
+   - *Discriminative*: Identify model-specific characteristics and inconsistencies
+
 2. **Feature Extraction**: 384-dim embeddings + 12 linguistic + 6 behavioral features
 3. **PCA** reduction to 64 dimensions (Optional)
 4. **Ensemble Classification**: Random Forest (45%) + SVM (45%) + MLP (10%)
+
+---
+
+## Contributing
+
+Contributions are welcome! Whether you're adding support for new models, improving accuracy, or extending to additional clients, please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ---
 
