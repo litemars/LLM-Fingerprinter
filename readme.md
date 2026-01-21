@@ -6,7 +6,7 @@ A black-box fingerprinting system that identifies the underlying LLM model famil
 
 You can find an *already* NLP trained model in the `model` directory.
 
-![Gemma](img/gemma.png) ![GPT](img/gpt.png)
+ <img src="img/gpt.png" width="200" height="200" alt="GPT">
 
 ## Supported Backends
 
