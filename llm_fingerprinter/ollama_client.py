@@ -4,44 +4,35 @@ import time
 from typing import List, Optional
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from src.base_client import BaseClient, ClientError
+from llm_fingerprinter.base_client import BaseClient, ClientError, ConnectionError as BaseConnectionError, GenerationError, AuthError
 
 logger = logging.getLogger(__name__)
 
 
-class OllamaCloudError(ClientError):
-    """Base exception for Ollama Cloud client errors."""
+class OllamaError(ClientError):
+    """Base exception for Ollama client errors."""
     pass
 
 
-class OllamaCloudConnectionError(OllamaCloudError):
-    """Raised when connection to Ollama Cloud fails."""
+class OllamaConnectionError(OllamaError):
+    """Raised when connection to Ollama fails."""
     pass
 
 
-class OllamaCloudGenerationError(OllamaCloudError):
+class OllamaGenerationError(OllamaError):
     """Raised when generation fails."""
     pass
 
 
-class OllamaCloudAuthError(OllamaCloudError):
-    """Raised when authentication fails."""
-    pass
+class OllamaClient(BaseClient):
 
-
-class OllamaCloudClient(BaseClient):
-
-    def __init__(self,
-                 api_key: str,
-                 endpoint: str = "https://api.ollama.com/v1",
+    def __init__(self, endpoint: str = "http://localhost:11434",
                  timeout: int = 60,
                  max_retries: int = 3):
-        super().__init__(timeout=timeout, max_retries=max_retries)
 
-        self.api_key = api_key
+        super().__init__(timeout=timeout, max_retries=max_retries)
         self.endpoint = endpoint.rstrip("/")
 
-        # Session with connection pooling
         self.session = requests.Session()
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=10,
@@ -51,12 +42,7 @@ class OllamaCloudClient(BaseClient):
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
 
-        self.session.headers.update({
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        })
-
-        logger.info(f"Initialized OllamaCloudClient for {endpoint}")
+        logger.info(f"Initialized OllamaClient for {endpoint}")
 
     def _perform_health_check(self) -> bool:
         try:
@@ -64,22 +50,15 @@ class OllamaCloudClient(BaseClient):
                 f"{self.endpoint}/api/tags",
                 timeout=10
             )
-
-            if resp.status_code == 401:
-                logger.warning("API reachable but authentication failed - check API key")
-            elif resp.status_code == 403:
-                logger.warning("API reachable but access forbidden - check permissions")
-
             return resp.status_code == 200
-
         except requests.exceptions.ConnectionError as e:
-            logger.error(f"Connection error to Ollama Cloud at {self.endpoint}: {e}")
+            logger.error(f"Connection error to Ollama at {self.endpoint}: {e}")
             return False
         except requests.exceptions.Timeout:
-            logger.error(f"Timeout connecting to Ollama Cloud at {self.endpoint}")
+            logger.error(f"Timeout connecting to Ollama at {self.endpoint}")
             return False
         except Exception as e:
-            logger.error(f"Error checking Ollama Cloud connectivity: {e}")
+            logger.error(f"Error checking Ollama connectivity: {e}")
             return False
 
     @retry(
@@ -88,14 +67,15 @@ class OllamaCloudClient(BaseClient):
         retry=retry_if_exception_type((requests.Timeout, requests.ConnectionError))
     )
     def generate(self, model, prompt, temperature=0.7, max_tokens=512, system=None):
-        url = f"{self.endpoint}/api/generate"
 
+        url = f"{self.endpoint}/api/generate"
         payload = {
             "model": model,
             "prompt": prompt,
             "stream": False,
             "options": {
-                "temperature": temperature
+                "temperature": temperature,
+                "num_predict": max_tokens,
             }
         }
 
@@ -118,37 +98,25 @@ class OllamaCloudClient(BaseClient):
                 logger.debug(f"Generated {len(text)} chars, {eval_count} tokens "
                            f"in {elapsed:.2f}s ({tokens_per_sec:.1f} tok/s)")
                 return text
-
-            elif response.status_code == 401:
-                raise OllamaCloudAuthError("Invalid API key")
-            elif response.status_code == 403:
-                raise OllamaCloudAuthError("Access forbidden - check API key permissions")
             elif response.status_code == 404:
-                raise OllamaCloudGenerationError(f"Model '{model}' not found")
-            elif response.status_code == 429:
-                raise OllamaCloudGenerationError("Rate limit exceeded - please wait and retry")
+                raise OllamaGenerationError(f"Model '{model}' not found on Ollama")
             else:
                 error_msg = response.text[:200] if response.text else "Unknown error"
-                try:
-                    error_json = response.json()
-                    error_msg = error_json.get("error", error_msg)
-                except (ValueError, KeyError):
-                    pass
-                raise OllamaCloudGenerationError(
-                    f"API error {response.status_code}: {error_msg}"
+                raise OllamaGenerationError(
+                    f"Ollama error {response.status_code}: {error_msg}"
                 )
 
         except requests.Timeout:
             logger.warning(f"Timeout querying {model} after {self.timeout}s")
             raise
         except requests.ConnectionError as e:
-            logger.error(f"Connection error to Ollama Cloud: {e}")
-            raise OllamaCloudConnectionError(f"Cannot connect to Ollama Cloud at {self.endpoint}")
-        except OllamaCloudError:
+            logger.error(f"Connection error to Ollama: {e}")
+            raise OllamaConnectionError(f"Cannot connect to Ollama at {self.endpoint}")
+        except OllamaError:
             raise
         except Exception as e:
             logger.error(f"Unexpected error generating from {model}: {e}")
-            raise OllamaCloudGenerationError(f"Generation failed: {e}")
+            raise OllamaGenerationError(f"Generation failed: {e}")
 
     def list_models(self) -> List[str]:
         try:
@@ -158,22 +126,50 @@ class OllamaCloudClient(BaseClient):
             if response.status_code == 200:
                 data = response.json()
                 models = [m["name"] for m in data.get("models", [])]
-                logger.info(f"Found {len(models)} models on Ollama Cloud")
+                logger.info(f"Found {len(models)} models on Ollama")
                 return models
-            elif response.status_code == 401:
-                logger.error("Authentication failed - check API key")
-                return []
             else:
                 logger.error(f"Failed to list models: HTTP {response.status_code}")
                 return []
         except requests.ConnectionError:
-            logger.error(f"Cannot connect to Ollama Cloud at {self.endpoint}")
+            logger.error(f"Cannot connect to Ollama at {self.endpoint}")
             return []
         except Exception as e:
             logger.error(f"Error listing models: {e}")
             return []
 
+    def pull_model(self, model: str, stream_progress: bool = True):
+        try:
+            url = f"{self.endpoint}/api/pull"
+            response = self.session.post(
+                url,
+                json={"name": model, "stream": stream_progress},
+                timeout=None,
+                stream=stream_progress
+            )
+
+            if stream_progress:
+                for line in response.iter_lines():
+                    if line:
+                        import json
+                        data = json.loads(line)
+                        status = data.get("status", "")
+                        if "pulling" in status or "downloading" in status:
+                            completed = data.get("completed", 0)
+                            total = data.get("total", 0)
+                            if total > 0:
+                                pct = completed / total * 100
+                                logger.info(f"Pulling {model}: {pct:.1f}%")
+                        elif status == "success":
+                            logger.info(f"Successfully pulled {model}")
+                            return True
+
+            return response.status_code == 200
+        except Exception as e:
+            logger.error(f"Error pulling model {model}: {e}")
+            return False
+
     def close(self):
         """Close the HTTP session."""
         self.session.close()
-        logger.debug("Closed OllamaCloudClient session")
+        logger.debug("Closed OllamaClient session")

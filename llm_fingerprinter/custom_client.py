@@ -20,7 +20,7 @@ Example request file (request.txt):
     }
 
 Usage:
-    from src.custom_client import CustomClient
+    from llm_fingerprinter.custom_client import CustomClient
 
     client = CustomClient(request_file="request.txt")
     response = client.generate(prompt="Hello!")
@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from src.base_client import BaseClient, ClientError
+from llm_fingerprinter.base_client import BaseClient, ClientError
 
 logger = logging.getLogger(__name__)
 

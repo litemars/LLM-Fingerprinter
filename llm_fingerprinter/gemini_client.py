@@ -2,7 +2,7 @@ import logging
 import time
 from typing import List, Optional
 
-from src.base_client import BaseClient, ClientError
+from llm_fingerprinter.base_client import BaseClient, ClientError
 
 logger = logging.getLogger(__name__)
 

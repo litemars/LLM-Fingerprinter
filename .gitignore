@@ -28,3 +28,8 @@ htmlcov/
 *.swp
 *.swo
 *~
+
+# PyPI packaging
+*.tar.gz
+*.whl
+sdist/

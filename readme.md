@@ -1,10 +1,14 @@
 # LLM Fingerprinting System
 
+[![PyPI version](https://badge.fury.io/py/llm-fingerprinter.svg)](https://pypi.org/project/llm-fingerprinter/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A black-box fingerprinting system that identifies the underlying LLM model family (GPT, LLaMA, Mistral, etc.) by analyzing response patterns across 75 discriminative prompts. The system can identify fine-tuned models as well, tracing them back to their foundational base model.
 
-**Note: Check config.py to see all identifiable model families** 
+**Note: Check config.py to see all identifiable model families**
 
-You can find an *already* NLP trained model in the `model` directory.
+A pre-trained classifier is bundled with the package in the `model` directory.
 
  <img src="img/gpt.png" width="400" height="400" alt="GPT">
 
@@ -31,11 +35,28 @@ All you need is an HTTP request template file! See examples in `./example/` dire
 
 ## Installation
 
-```bash
-pip install -r requirements.txt
+### From PyPI
 
-# Or install as a package
-pip3 install -e .
+```bash
+# Core package (Ollama + custom backends)
+pip install llm-fingerprinter
+
+# With OpenAI support
+pip install llm-fingerprinter[openai]
+
+# With Gemini support
+pip install llm-fingerprinter[gemini]
+
+# With all backends
+pip install llm-fingerprinter[all]
+```
+
+### From source (development)
+
+```bash
+git clone https://github.com/litemars/LLM-Fingerprinter.git
+cd LLM-Fingerprinter
+pip install -e ".[all,dev]"
 
 # Optional: Download NLTK data for text processing
 python -c "import nltk; nltk.download('punkt_tab'); nltk.download('stopwords')"
@@ -123,7 +144,24 @@ llm-fingerprinter identify -b custom -r ./custom_request.txt -k my-api-key
 llm-fingerprinter simulate -b custom -r ./custom_request.txt --family gpt
 ```
 
-💡 **Tip:** See `./example/` directory for request template examples (openai_request.txt, ollama_cloud_request.txt, etc.)
+## Python API
+
+You can also use the library programmatically:
+
+```python
+from llm_fingerprinter import LLMFingerprinter, EnsembleClassifier, FeatureExtractor, PromptSuite
+from llm_fingerprinter.ollama_client import OllamaClient
+
+# Setup components
+client = OllamaClient(endpoint="http://localhost:11434")
+suite = PromptSuite()
+extractor = FeatureExtractor()
+classifier = EnsembleClassifier()
+
+# Create fingerprinter and identify a model
+fingerprinter = LLMFingerprinter("http://localhost:11434", client, suite, extractor, classifier)
+fingerprint = fingerprinter.fingerprint_model("llama3.2")
+```
 
 ---
 
@@ -318,18 +356,18 @@ llm-fingerprinter train --no-augment
 Verify connectivity and generation with a backend.
 
 ```bash
-llm-fingerprinter test [OPTIONS]
+llm-fingerprinter train [--augment/--no-augment] [--cross-validate]
 ```
 
-**Options:**
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--augment/--no-augment` | `--augment` | Data augmentation |
+| `--use-pca` | off | Use PCA reduction |
+| `--pca-components` | 64 | PCA components |
+| `--cross-validate` / `-cv` | off | Run k-fold cross-validation |
+| `--cv-folds` | 5 | Number of CV folds |
 
-| Option | Short | Default | Description |
-|--------|-------|---------|-------------|
-| `--model` | `-m` | - | Model name (optional) |
-| `--prompt` | `-p` | "Hello! How are you?" | Test prompt |
-| `--backend` | `-b` | `ollama` | LLM backend |
-| `--endpoint` | `-e` | auto | API endpoint |
-| `--api-key` | `-k` | env var | API key |
+### `identify`
 
 **Examples:**
 
@@ -347,8 +385,6 @@ llm-fingerprinter test -b ollama --model llama3.2 -p "What is 2+2?"
 # Test custom backend
 llm-fingerprinter test -b custom -r ./custom_request.txt
 ```
-
----
 
 ### `fingerprint` - Generate Standalone Fingerprint
 
@@ -600,7 +636,11 @@ llm-fingerprinter train --cross-validate --cv-folds 10
 | `DEEPSEEK_API_KEY` | deepseek | DeepSeek API key |
 | `CUSTOM_API_KEY` | custom | Custom API key |
 | `LOG_LEVEL` | all | Logging level (DEBUG, INFO, etc.) |
+| `LLM_FINGERPRINTER_DATA` | all | Custom data directory path |
 
+## Data Storage
+
+When installed via pip, runtime data (fingerprints, trained models, logs) is stored in `~/.llm-fingerprinter/`. You can override this with the `LLM_FINGERPRINTER_DATA` environment variable. When running from a git checkout, data is stored in the project directory (backward compatible).
 
 ## 🔧 Custom Backend Deep Dive
 
@@ -709,4 +749,3 @@ Contributions are welcome! Whether you're adding support for new models, improvi
 ## License
 
 MIT License
-

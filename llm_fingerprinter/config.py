@@ -1,5 +1,9 @@
 import os
+import shutil
 from pathlib import Path
+
+# Package directory (where the code lives)
+PACKAGE_DIR = Path(__file__).parent
 
 # Model families to identify
 ## I will need to enable deepseek when I will have enough samples
@@ -22,13 +26,38 @@ MODEL_FAMILIES = {
     "qwen": 5,
 }
 
+
+def _get_data_dir() -> Path:
+    """Get the data directory for runtime files.
+
+    Uses LLM_FINGERPRINTER_DATA env var if set, otherwise:
+    - If running from a git checkout (has .git or .gitignore in parent),
+      uses the project root (backward compatible).
+    - Otherwise uses ~/.llm-fingerprinter/ as the user data directory.
+    """
+    env_dir = os.environ.get("LLM_FINGERPRINTER_DATA")
+    if env_dir:
+        return Path(env_dir)
+
+    # Check if we're in a development/git checkout
+    project_root = PACKAGE_DIR.parent
+    if (project_root / ".git").exists() or (project_root / ".gitignore").exists():
+        return project_root
+
+    # Installed via pip - use a user data directory
+    return Path.home() / ".llm-fingerprinter"
+
+
 # Paths
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = _get_data_dir()
 FINGERPRINTS_DIR = BASE_DIR / "fingerprints"
 TRAINING_DIR = FINGERPRINTS_DIR / "training"   # simulation data for training
 RESULTS_DIR = FINGERPRINTS_DIR / "results"     # inference/identification results
 MODEL_DIR = BASE_DIR / "model"
 LOGS_DIR = BASE_DIR / "logs"
+
+# Bundled pre-trained model (shipped with the package)
+BUNDLED_MODEL_DIR = PACKAGE_DIR.parent / "model"
 
 # Ensure directories exist
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -36,6 +65,12 @@ FINGERPRINTS_DIR.mkdir(parents=True, exist_ok=True)
 TRAINING_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Copy bundled model to user data dir if not already present
+_bundled_classifier = BUNDLED_MODEL_DIR / "classifier_model.joblib"
+_user_classifier = MODEL_DIR / "classifier_model.joblib"
+if _bundled_classifier.exists() and not _user_classifier.exists():
+    shutil.copy2(_bundled_classifier, _user_classifier)
 
 # Feature extraction
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
