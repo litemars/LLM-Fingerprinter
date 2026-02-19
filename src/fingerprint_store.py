@@ -30,7 +30,7 @@ class FingerprintStore:
 
     def save_fingerprint(self, fingerprint, model_name, family = None):
 
-        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S_%fZ")
 
         # JSON to save
         data = {
@@ -143,7 +143,7 @@ class FingerprintStore:
 
         return sorted(files, reverse=True)
 
-    # not called not
+    # not called now
     def delete_fingerprint(self, filepath: str):
         path = Path(filepath)
         

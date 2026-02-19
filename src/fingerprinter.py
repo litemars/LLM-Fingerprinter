@@ -2,8 +2,6 @@ import numpy as np
 import logging
 import time
 from datetime import datetime
-from scipy.spatial.distance import cosine, euclidean
-import os
 
 logger = logging.getLogger(__name__)
 

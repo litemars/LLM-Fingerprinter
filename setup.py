@@ -9,6 +9,8 @@ long_description = (this_directory / "readme.md").read_text(encoding="utf-8")
 setup(
     name="llm-fingerprinter",
     version="0.1.0",
+    author_email="maxmassi12@gmail.com",
+    url="https://github.com/litemars/llm-fingerprinter",
     description="Black-box LLM fingerprinting system for model identification",
     long_description=long_description,
     long_description_content_type="text/markdown",

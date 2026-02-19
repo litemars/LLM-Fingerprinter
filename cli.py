@@ -286,7 +286,7 @@ def simulate(ctx, backend, endpoint, api_key, request_file, model, family, num_s
         classifier = EnsembleClassifier(config.MODEL_FAMILIES)
         fingerprinter = LLMFingerprinter(endpoint if backend != "custom" else "custom",
                                          client, suite, extractor, classifier)
-        store = FingerprintStore(str(config.FINGERPRINTS_DIR))
+        store = FingerprintStore(str(config.TRAINING_DIR))
 
         model_display = model or "default"
         click.echo(f"\n🔄 Running {num_sims} simulations for {model_display} ({family})...")
@@ -297,7 +297,7 @@ def simulate(ctx, backend, endpoint, api_key, request_file, model, family, num_s
             fp = fingerprinter.fingerprint_model(model, repeats=repeats)
             
             if fp is None:
-                click.echo(click.style(f"    ⚠️ Failed", fg='yellow'))
+                click.echo(click.style(f"    ⚠️ Failed (all prompts returned errors)", fg='yellow'))
                 continue
 
             fp['metadata']['family'] = family
@@ -305,6 +305,10 @@ def simulate(ctx, backend, endpoint, api_key, request_file, model, family, num_s
             fp_path = store.save_fingerprint(fp, f"{family}_sim_{sim_idx}", family=family)
             click.echo(f"    ✅ Saved: {fp_path.name} ({len(fp['vector'])} dims)")
             success_count += 1
+
+        if success_count == 0:
+            click.echo(click.style(f"\n❌ All {num_sims} simulations failed", fg='red'))
+            sys.exit(1)
 
         click.echo(f"\n✅ Completed {success_count}/{num_sims} simulations")
         click.echo("   Next: Run 'train' to build classifier")
@@ -320,19 +324,24 @@ def simulate(ctx, backend, endpoint, api_key, request_file, model, family, num_s
 
 @cli.command()
 @click.option('--augment/--no-augment', default=True, help='Data augmentation')
-@click.option('--use-pca', is_flag=True, default=False, 
+@click.option('--use-pca', is_flag=True, default=False,
               help='Use PCA reduction (default: use raw 402-dim features)')
-@click.option('--pca-components', default=64, type=int, 
+@click.option('--pca-components', default=64, type=int,
               help='PCA components if --use-pca (default: 64)')
+@click.option('--cross-validate', '-cv', is_flag=True, default=False,
+              help='Run k-fold cross-validation before training')
+@click.option('--cv-folds', default=5, type=int,
+              help='Number of cross-validation folds (default: 5)')
 @click.pass_context
-def train(ctx, augment, use_pca, pca_components):
+def train(ctx, augment, use_pca, pca_components, cross_validate, cv_folds):
     """Train classifier from saved fingerprints.
-    
+
     \b
     Examples:
-      train                    # Raw features (recommended)
-      train --use-pca          # With PCA (64 components)
-      train --use-pca --pca-components 32
+      train                        # Raw features (recommended)
+      train --use-pca              # With PCA (64 components)
+      train --cross-validate       # With 5-fold cross-validation
+      train -cv --cv-folds 3       # With 3-fold cross-validation
     """
     print_header()
     logger = ctx.obj['logger']
@@ -341,9 +350,14 @@ def train(ctx, augment, use_pca, pca_components):
     click.echo(f"🔧 Training mode: {mode}")
 
     try:
-        store = FingerprintStore(str(config.FINGERPRINTS_DIR))
-        click.echo("\n📂 Loading fingerprints...")
-        training_data = store.export_for_training()
+        # Load from new training dir, fall back to legacy fingerprints dir
+        training_data = {}
+        for search_dir in [config.TRAINING_DIR, config.FINGERPRINTS_DIR]:
+            store = FingerprintStore(str(search_dir))
+            click.echo(f"\n📂 Loading fingerprints from {search_dir.name}/...")
+            data = store.export_for_training()
+            for family, vectors in data.items():
+                training_data.setdefault(family, []).extend(vectors)
 
         if not training_data:
             click.echo(click.style("❌ No fingerprints found", fg='red'))
@@ -375,9 +389,41 @@ def train(ctx, augment, use_pca, pca_components):
             click.echo(click.style("❌ Training failed", fg='red'))
             sys.exit(1)
 
+        # Cross-validation
+        if cross_validate:
+            click.echo(f"\n📈 Running {cv_folds}-fold cross-validation...")
+            import numpy as np
+            X_list, y_list = [], []
+            for family_name, vectors in training_data.items():
+                if family_name not in config.MODEL_FAMILIES:
+                    continue
+                class_id = config.MODEL_FAMILIES[family_name]
+                for v in vectors:
+                    X_list.append(np.array(v, dtype=np.float32) if not isinstance(v, np.ndarray) else v)
+                    y_list.append(class_id)
+
+            X_cv = np.array(X_list, dtype=np.float32)
+            y_cv = np.array(y_list)
+
+            cv_results = clf.cross_validate(X_cv, y_cv, n_folds=cv_folds)
+            if cv_results:
+                click.echo(f"\n   Mean accuracy: {cv_results['mean_accuracy']:.1%} "
+                          f"({cv_results['n_folds']} folds)")
+                click.echo(f"\n   Per-family metrics:")
+                click.echo(f"   {'Family':12s} {'Prec':>6s} {'Recall':>8s} {'F1':>6s} {'Support':>8s}")
+                click.echo(f"   {'-'*42}")
+                for fam, metrics in sorted(cv_results['per_family'].items()):
+                    click.echo(f"   {fam:12s} {metrics['precision']:6.3f} {metrics['recall']:8.3f} "
+                              f"{metrics['f1']:6.3f} {metrics['support']:8d}")
+
+                click.echo(f"\n   Fold accuracies: "
+                          + ", ".join(f"{a:.1%}" for a in cv_results['fold_accuracies']))
+            else:
+                click.echo(click.style("   ⚠️ Not enough samples per class for cross-validation", fg='yellow'))
+
         classifier_path = config.MODEL_DIR / "classifier_model.joblib"
         clf.save(str(classifier_path))
-        
+
         click.echo(f"\n✅ Classifier trained and saved!")
         click.echo(f"   Mode: {mode}")
         click.echo(f"   Input dim: {clf.input_dim}")
@@ -427,8 +473,16 @@ def list_models(ctx, backend, endpoint, api_key, request_file):
 def list_fingerprints():
     """List saved fingerprints."""
     print_header()
-    store = FingerprintStore(str(config.FINGERPRINTS_DIR))
-    counts = store.count_by_family()
+
+    # Aggregate counts from training dir, legacy dir, and results dir
+    counts = {}
+    for label, directory in [("training", config.TRAINING_DIR),
+                             ("legacy", config.FINGERPRINTS_DIR),
+                             ("results", config.RESULTS_DIR)]:
+        store = FingerprintStore(str(directory))
+        dir_counts = store.count_by_family()
+        for fam, cnt in dir_counts.items():
+            counts[fam] = counts.get(fam, 0) + cnt
 
     if not counts:
         click.echo("No fingerprints found")
@@ -451,7 +505,8 @@ def list_fingerprints():
             mode = "PCA" if data.get('use_pca', False) else "raw features"
             dims = data.get('input_dim', '?')
             click.echo(f"\n✅ Classifier trained ({mode}, {dims} dims)")
-        except:
+        except Exception as e:
+            logger.debug(f"Could not load classifier details: {e}")
             click.echo("\n✅ Classifier available")
     else:
         click.echo("\n⚠️  No classifier. Run 'train'")
@@ -491,7 +546,7 @@ def info():
             mode = "PCA" if data.get('use_pca', False) else "raw features"
             dims = data.get('input_dim', '?')
             click.echo(f"  Classifier:   ✅ trained ({mode}, {dims} dims)")
-        except:
+        except Exception:
             click.echo(f"  Classifier:   ✅ trained")
     else:
         click.echo(f"  Classifier:   ❌ not trained")
@@ -609,10 +664,10 @@ def fingerprint(ctx, backend, endpoint, api_key, request_file, model, repeats, o
         click.echo(f"   Queries:   {fp['metadata']['queries_executed']}")
         click.echo(f"   Duration:  {fp['metadata']['duration_seconds']:.1f}s")
 
-        if output:
-            store = FingerprintStore(output)
-            path = store.save_fingerprint(fp, model_display)
-            click.echo(f"\n📁 Saved: {path}")
+        save_dir = output or str(config.RESULTS_DIR)
+        store = FingerprintStore(save_dir)
+        path = store.save_fingerprint(fp, model_display)
+        click.echo(f"\n📁 Saved: {path}")
 
     except Exception as e:
         click.echo(click.style(f"❌ Error: {e}", fg='red'))

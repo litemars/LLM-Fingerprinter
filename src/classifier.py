@@ -301,8 +301,97 @@ class EnsembleClassifier:
         return self.train(X, y)
 
 
+    def cross_validate(self, X: np.ndarray, y: np.ndarray, n_folds: int = 5):
+        """Run k-fold cross-validation and return per-family metrics.
+
+        Args:
+            X: Feature matrix (n_samples, n_features).
+            y: Label vector (n_samples,).
+            n_folds: Number of folds (default 5).
+
+        Returns:
+            Dict with keys:
+            - fold_accuracies: list of per-fold accuracy
+            - mean_accuracy: float
+            - per_family: dict mapping family name -> {precision, recall, f1}
+            - confusion_matrix: np.ndarray
+        """
+        from sklearn.model_selection import StratifiedKFold
+        from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
+
+        unique_classes = np.unique(y)
+        actual_folds = min(n_folds, min(np.bincount(y.astype(int))))
+        if actual_folds < 2:
+            logger.warning("Not enough samples per class for cross-validation")
+            return None
+
+        skf = StratifiedKFold(n_splits=actual_folds, shuffle=True, random_state=42)
+
+        fold_accuracies = []
+        all_y_true = []
+        all_y_pred = []
+
+        for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X, y)):
+            X_train, X_val = X[train_idx], X[val_idx]
+            y_train, y_val = y[train_idx], y[val_idx]
+
+            # Create a temporary classifier with same settings
+            temp = EnsembleClassifier(
+                model_families=self.model_families,
+                use_pca=self.use_pca,
+                pca_components=self.pca_target_components,
+                augment_data=self.augment_data,
+                augment_noise_std=self.augment_noise_std,
+                augment_samples=self.augment_samples,
+            )
+            temp.train(X_train, y_train)
+
+            correct = 0
+            for i in range(len(X_val)):
+                family, _, _ = temp.predict_with_confidence(X_val[i])
+                pred_id = self.model_families.get(family, -1)
+                all_y_true.append(int(y_val[i]))
+                all_y_pred.append(pred_id)
+                if pred_id == int(y_val[i]):
+                    correct += 1
+
+            acc = correct / len(X_val)
+            fold_accuracies.append(acc)
+            logger.info(f"Fold {fold_idx + 1}/{actual_folds}: accuracy={acc:.3f}")
+
+        all_y_true = np.array(all_y_true)
+        all_y_pred = np.array(all_y_pred)
+
+        precision, recall, f1, support = precision_recall_fscore_support(
+            all_y_true, all_y_pred, labels=list(range(self.n_classes)), zero_division=0
+        )
+        cm = confusion_matrix(all_y_true, all_y_pred, labels=list(range(self.n_classes)))
+
+        per_family = {}
+        for class_id in range(self.n_classes):
+            if class_id in self.families_inv:
+                name = self.families_inv[class_id]
+                per_family[name] = {
+                    "precision": float(precision[class_id]),
+                    "recall": float(recall[class_id]),
+                    "f1": float(f1[class_id]),
+                    "support": int(support[class_id]),
+                }
+
+        mean_acc = float(np.mean(fold_accuracies))
+        logger.info(f"Cross-validation: {actual_folds}-fold mean accuracy = {mean_acc:.3f}")
+
+        return {
+            "fold_accuracies": fold_accuracies,
+            "mean_accuracy": mean_acc,
+            "per_family": per_family,
+            "confusion_matrix": cm,
+            "n_folds": actual_folds,
+        }
+
+
 ## This function can be changed if you want to build another classifier
-def create_classifier(model_families = None, use_pca = False, **kwargs):
+def create_classifier(model_families=None, use_pca=False, **kwargs):
 
     return EnsembleClassifier(model_families=model_families, use_pca=use_pca, **kwargs)
 
