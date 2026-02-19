@@ -1,10 +1,13 @@
 import logging
 import time
+from typing import List, Optional
+
+from src.base_client import BaseClient, ClientError
 
 logger = logging.getLogger(__name__)
 
 
-class GeminiError(Exception):
+class GeminiError(ClientError):
     """Base exception for Gemini client errors."""
     pass
 
@@ -24,22 +27,15 @@ class GeminiAuthError(GeminiError):
     pass
 
 
-class GeminiClient:
-    
-    def __init__(self, 
-                 api_key,
-                 endpoint=None,  # Not used, kept for API compatibility
-                 timeout=60,
-                 max_retries=3):
-        """
-        Initialize Gemini client.
-        
-        Args:
-            api_key: Google AI API key
-            endpoint: Not used (kept for API compatibility)
-            timeout: Request timeout in seconds
-            max_retries: Maximum number of retries for failed requests
-        """
+class GeminiClient(BaseClient):
+
+    def __init__(self,
+                 api_key: str,
+                 endpoint: Optional[str] = None,  # Not used, kept for API compatibility
+                 timeout: int = 60,
+                 max_retries: int = 3):
+        super().__init__(timeout=timeout, max_retries=max_retries)
+
         # Lazy import - only import when class is instantiated
         try:
             from google import genai
@@ -48,39 +44,20 @@ class GeminiClient:
             raise ImportError(
                 "google-genai package is required. Install with: pip install google-genai"
             ) from e
-        
-        # Store the module references as instance attributes
+
         self._genai = genai
         self._types = types
-        
+
         self.api_key = api_key
-        self.timeout = timeout
-        self.max_retries = max_retries
-        
-        # Initialize the client
+
         self.client = genai.Client(api_key=api_key)
-        
-        # Cache connectivity status
-        self._last_health_check = None
-        self._health_check_interval = 30
-        self._is_healthy = False
-        
+
         logger.info("Initialized GeminiClient with google-genai SDK")
-    
-    def _check_connectivity(self, force=False):
-        now = time.time()
-        
-        if not force and self._last_health_check is not None:
-            if now - self._last_health_check < self._health_check_interval:
-                return self._is_healthy
-        
+
+    def _perform_health_check(self) -> bool:
         try:
-            # Try to list models as health check
             list(self.client.models.list())
-            self._is_healthy = True
-            self._last_health_check = now
             return True
-            
         except Exception as e:
             error_str = str(e).lower()
             if "api key" in error_str or "authentication" in error_str or "401" in error_str:
@@ -89,65 +66,49 @@ class GeminiClient:
                 logger.warning("API reachable but access forbidden - check permissions")
             else:
                 logger.error(f"Error checking Gemini API connectivity: {e}")
-            
-            self._is_healthy = False
-            self._last_health_check = now
             return False
-    
+
     def generate(self, model, prompt, temperature=0.7,
                  max_tokens=512, system=None):
-        """
-        Generate completion from model.
-        
-        Args:
-            model: Model name (e.g., 'gemini-2.0-flash-exp', 'gemini-1.5-flash')
-            prompt: Input prompt
-        
-        Returns:
-            Generated text
-        """
         start = time.time()
-        
+
         try:
-            # Build generation config using stored types reference
             config = self._types.GenerateContentConfig(
                 temperature=temperature,
                 max_output_tokens=max_tokens,
             )
-            
-            # Add system instruction if provided
+
             if system:
                 config.system_instruction = system
-            
-            # Generate content
+
             response = self.client.models.generate_content(
                 model=model,
                 contents=prompt,
                 config=config,
             )
-            
+
             elapsed = time.time() - start
-            
+
             if not response.candidates:
                 if response.prompt_feedback:
                     block_reason = getattr(response.prompt_feedback, 'block_reason', None)
                     if block_reason:
                         raise GeminiGenerationError(f"Content blocked: {block_reason}")
                 raise GeminiGenerationError("No candidates in response")
-            
+
             text = response.text.strip() if response.text else ""
-            
+
             usage = getattr(response, 'usage_metadata', None)
             output_tokens = getattr(usage, 'candidates_token_count', 0) if usage else 0
-            
+
             logger.debug(f"Generated {len(text)} chars, {output_tokens} tokens in {elapsed:.2f}s")
             return text
-            
+
         except GeminiError:
             raise
         except Exception as e:
             error_str = str(e).lower()
-            
+
             if "api key" in error_str or "authentication" in error_str or "401" in error_str:
                 raise GeminiAuthError("Invalid API key")
             elif "403" in error_str or "forbidden" in error_str:
@@ -161,14 +122,8 @@ class GeminiClient:
             else:
                 logger.error(f"Unexpected error generating from {model}: {e}")
                 raise GeminiGenerationError(f"Generation failed: {e}")
-    
-    def list_models(self):
-        """
-        List available Gemini models.
-        
-        Returns:
-            List of model names, empty list on error
-        """
+
+    def list_models(self) -> List[str]:
         try:
             models = []
             for model in self.client.models.list():
@@ -176,14 +131,14 @@ class GeminiClient:
 
                 if name.startswith("models/"):
                     name = name[7:]
-                
+
                 supported_methods = getattr(model, 'supported_generation_methods', [])
                 if 'generateContent' in supported_methods:
                     models.append(name)
-            
+
             logger.info(f"Found {len(models)} Gemini models")
             return sorted(models)
-            
+
         except Exception as e:
             error_str = str(e).lower()
             if "api key" in error_str or "authentication" in error_str:
@@ -191,26 +146,16 @@ class GeminiClient:
             else:
                 logger.error(f"Error listing models: {e}")
             return []
-    
+
     def model_info(self, model):
-        """
-        Get model information from Gemini API.
-        
-        Args:
-            model: Model name
-            
-        Returns:
-            Model info dict or None on error
-        """
         try:
-            # Normalize model name
             if not model.startswith("models/"):
                 model_path = f"models/{model}"
             else:
                 model_path = model
-            
+
             model_obj = self.client.models.get(model=model_path)
-            
+
             return {
                 "name": model_obj.name,
                 "display_name": getattr(model_obj, 'display_name', None),
@@ -219,7 +164,7 @@ class GeminiClient:
                 "output_token_limit": getattr(model_obj, 'output_token_limit', None),
                 "supported_generation_methods": getattr(model_obj, 'supported_generation_methods', []),
             }
-            
+
         except Exception as e:
             error_str = str(e).lower()
             if "404" in error_str or "not found" in error_str:
@@ -227,13 +172,6 @@ class GeminiClient:
             else:
                 logger.error(f"Error getting model info for {model}: {e}")
             return None
-    
+
     def close(self):
         logger.debug("Closed GeminiClient")
-    
-    def __enter__(self):
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-        return False

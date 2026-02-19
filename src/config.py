@@ -25,12 +25,16 @@ MODEL_FAMILIES = {
 # Paths
 BASE_DIR = Path(__file__).parent.parent
 FINGERPRINTS_DIR = BASE_DIR / "fingerprints"
+TRAINING_DIR = FINGERPRINTS_DIR / "training"   # simulation data for training
+RESULTS_DIR = FINGERPRINTS_DIR / "results"     # inference/identification results
 MODEL_DIR = BASE_DIR / "model"
 LOGS_DIR = BASE_DIR / "logs"
 
 # Ensure directories exist
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 FINGERPRINTS_DIR.mkdir(parents=True, exist_ok=True)
+TRAINING_DIR.mkdir(parents=True, exist_ok=True)
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Feature extraction
@@ -42,6 +46,10 @@ LINGUISTIC_DIM = 12
 BEHAVIORAL_DIM = 6
 
 TOTAL_FEATURE_DIM = EMBEDDING_DIM + LINGUISTIC_DIM + BEHAVIORAL_DIM  # 402
+assert TOTAL_FEATURE_DIM == 402, (
+    f"Feature dimension mismatch: {EMBEDDING_DIM} + {LINGUISTIC_DIM} + {BEHAVIORAL_DIM} "
+    f"= {TOTAL_FEATURE_DIM}, expected 402"
+)
 
 # PCA target dimension (should be <= min samples or total features)
 PCA_DIM = 64
