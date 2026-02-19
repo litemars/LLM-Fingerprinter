@@ -13,22 +13,18 @@ import os
 from pathlib import Path
 from datetime import datetime
 
-
-# Setup path for local imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from src.ollama_client import OllamaClient
-from src.openai_client import OpenAIClient, OpenAIAuthError
-from src.ollama_cloud_client import OllamaCloudClient, OllamaCloudAuthError
-from src.custom_client import CustomClient, CustomAuthError
-from src.deepseek_client import DeepSeekClient, DeepSeekAuthError
-from src.gemini_client import GeminiClient, GeminiAuthError
-from src.prompt_suite import PromptSuite
-from src.feature_extractor import FeatureExtractor
-from src.classifier import EnsembleClassifier, create_classifier
-from src.fingerprinter import LLMFingerprinter
-from src.fingerprint_store import FingerprintStore
-from src import config
+from llm_fingerprinter.ollama_client import OllamaClient
+from llm_fingerprinter.openai_client import OpenAIClient, OpenAIAuthError
+from llm_fingerprinter.ollama_cloud_client import OllamaCloudClient, OllamaCloudAuthError
+from llm_fingerprinter.custom_client import CustomClient, CustomAuthError
+from llm_fingerprinter.deepseek_client import DeepSeekClient, DeepSeekAuthError
+from llm_fingerprinter.gemini_client import GeminiClient, GeminiAuthError
+from llm_fingerprinter.prompt_suite import PromptSuite
+from llm_fingerprinter.feature_extractor import FeatureExtractor
+from llm_fingerprinter.classifier import EnsembleClassifier, create_classifier
+from llm_fingerprinter.fingerprinter import LLMFingerprinter
+from llm_fingerprinter.fingerprint_store import FingerprintStore
+from llm_fingerprinter import config
 
 
 def setup_logging(verbose: bool = False):

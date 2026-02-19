@@ -1,0 +1,16 @@
+include LICENSE
+include readme.md
+include requirements.txt
+include pyproject.toml
+
+# Pre-trained model
+recursive-include model *.joblib
+
+# Example request templates
+recursive-include example *.txt
+
+# Exclude dev/build artifacts
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude *.so
+global-exclude .DS_Store

@@ -2,38 +2,48 @@ import logging
 import time
 from typing import List, Optional
 
-from src.base_client import BaseClient, ClientError
+from llm_fingerprinter.base_client import BaseClient, ClientError
 
 logger = logging.getLogger(__name__)
 
 
-class DeepSeekError(ClientError):
-    """Base exception for DeepSeek client errors."""
+class OpenAIError(ClientError):
+    """Base exception for OpenAI client errors."""
     pass
 
 
-class DeepSeekConnectionError(DeepSeekError):
-    """Raised when connection to DeepSeek API fails."""
+class OpenAIConnectionError(OpenAIError):
+    """Raised when connection to OpenAI API fails."""
     pass
 
 
-class DeepSeekGenerationError(DeepSeekError):
+class OpenAIGenerationError(OpenAIError):
     """Raised when generation fails."""
     pass
 
 
-class DeepSeekAuthError(DeepSeekError):
+class OpenAIAuthError(OpenAIError):
     """Raised when authentication fails."""
     pass
 
 
-class DeepSeekClient(BaseClient):
+class OpenAIClient(BaseClient):
+    """Client for OpenAI API using official openai SDK.
+
+    Works with:
+    - OpenAI API (api.openai.com)
+    - Azure OpenAI
+    - Any OpenAI-compatible endpoint
+
+    Install: pip install openai
+    """
 
     def __init__(self,
                  api_key: str,
-                 endpoint: str = "https://api.deepseek.com",
+                 endpoint: str = "https://api.openai.com/v1",
                  timeout: int = 60,
-                 max_retries: int = 3):
+                 max_retries: int = 3,
+                 organization: Optional[str] = None):
         super().__init__(timeout=timeout, max_retries=max_retries)
 
         # Lazy import - only import when class is instantiated
@@ -49,15 +59,17 @@ class DeepSeekClient(BaseClient):
 
         self.api_key = api_key
         self.endpoint = endpoint.rstrip("/")
+        self.organization = organization
 
         self.client = OpenAI(
             api_key=api_key,
-            base_url=self.endpoint,
+            base_url=endpoint,
             timeout=timeout,
             max_retries=max_retries,
+            organization=organization,
         )
 
-        logger.info(f"Initialized DeepSeekClient for {self.endpoint}")
+        logger.info(f"Initialized OpenAIClient for {endpoint}")
 
     def _perform_health_check(self) -> bool:
         try:
@@ -76,7 +88,7 @@ class DeepSeekClient(BaseClient):
             logger.error(f"Error checking API connectivity: {e}")
             return False
 
-    def generate(self, model, prompt, system=None, temperature=0.7, max_tokens=512):
+    def generate(self, model, prompt, temperature=0.7, max_tokens=512, system=None):
         start = time.time()
 
         try:
@@ -93,7 +105,7 @@ class DeepSeekClient(BaseClient):
             elapsed = time.time() - start
 
             if not response.choices:
-                raise DeepSeekGenerationError("No choices in response")
+                raise OpenAIGenerationError("No choices in response")
 
             text = response.choices[0].message.content
             text = text.strip() if text else ""
@@ -105,30 +117,30 @@ class DeepSeekClient(BaseClient):
             return text
 
         except self._openai_module.AuthenticationError:
-            raise DeepSeekAuthError("Invalid API key")
+            raise OpenAIAuthError("Invalid API key")
         except self._openai_module.PermissionDeniedError:
-            raise DeepSeekAuthError("Access forbidden - check API key permissions")
+            raise OpenAIAuthError("Access forbidden - check API key permissions")
         except self._openai_module.NotFoundError:
-            raise DeepSeekGenerationError(f"Model '{model}' not found")
+            raise OpenAIGenerationError(f"Model '{model}' not found")
         except self._openai_module.RateLimitError:
-            raise DeepSeekGenerationError("Rate limit exceeded - please wait and retry")
+            raise OpenAIGenerationError("Rate limit exceeded - please wait and retry")
         except self._openai_module.APIConnectionError as e:
             logger.error(f"Connection error to API: {e}")
-            raise DeepSeekConnectionError(f"Cannot connect to API at {self.endpoint}")
+            raise OpenAIConnectionError(f"Cannot connect to API at {self.endpoint}")
         except self._openai_module.APITimeoutError:
             logger.warning(f"Timeout querying {model} after {self.timeout}s")
-            raise DeepSeekConnectionError(f"Request timeout after {self.timeout}s")
-        except DeepSeekError:
+            raise OpenAIConnectionError(f"Request timeout after {self.timeout}s")
+        except OpenAIError:
             raise
         except Exception as e:
             logger.error(f"Unexpected error generating from {model}: {e}")
-            raise DeepSeekGenerationError(f"Generation failed: {e}")
+            raise OpenAIGenerationError(f"Generation failed: {e}")
 
     def list_models(self) -> List[str]:
         try:
             models = [model.id for model in self.client.models.list()]
-            models.sort()
-            logger.info(f"Found {len(models)} models on DeepSeek API")
+            models.sort(key=lambda x: (0 if 'gpt' in x.lower() else 1, x))
+            logger.info(f"Found {len(models)} models on API")
             return models
         except self._openai_module.AuthenticationError:
             logger.error("Authentication failed - check API key")
@@ -138,8 +150,7 @@ class DeepSeekClient(BaseClient):
             return []
         except Exception as e:
             logger.error(f"Error listing models: {e}")
-            # Return known models as fallback
-            return ["deepseek-chat", "deepseek-coder", "deepseek-reasoner"]
+            return []
 
     def model_info(self, model):
         try:
@@ -147,8 +158,8 @@ class DeepSeekClient(BaseClient):
             return {
                 "id": model_obj.id,
                 "object": model_obj.object,
-                "created": getattr(model_obj, 'created', None),
-                "owned_by": getattr(model_obj, 'owned_by', 'deepseek'),
+                "created": model_obj.created,
+                "owned_by": model_obj.owned_by,
             }
         except self._openai_module.NotFoundError:
             logger.warning(f"Model '{model}' not found")
@@ -159,4 +170,4 @@ class DeepSeekClient(BaseClient):
 
     def close(self):
         self.client.close()
-        logger.debug("Closed DeepSeekClient")
+        logger.debug("Closed OpenAIClient")

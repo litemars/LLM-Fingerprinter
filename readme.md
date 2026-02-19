@@ -1,10 +1,14 @@
 # LLM Fingerprinting System
 
+[![PyPI version](https://badge.fury.io/py/llm-fingerprinter.svg)](https://pypi.org/project/llm-fingerprinter/)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A black-box fingerprinting system that identifies the underlying LLM model family (GPT, LLaMA, Mistral, etc.) by analyzing response patterns across 75 discriminative prompts. The system can identify fine-tuned models as well, tracing them back to their foundational base model.
 
-**Note: Check config.py to see all identifiable model families** 
+**Note: Check config.py to see all identifiable model families**
 
-You can find an *already* NLP trained model in the `model` directory.
+A pre-trained classifier is bundled with the package in the `model` directory.
 
  <img src="img/gpt.png" width="400" height="400" alt="GPT">
 
@@ -12,20 +16,37 @@ You can find an *already* NLP trained model in the `model` directory.
 
 | Backend | Description | API Key Required |
 |---------|-------------|------------------|
-| `ollama` | Local Ollama instance | ❌ No |
-| `ollama-cloud` | Ollama Cloud API | ✅ `OLLAMA_CLOUD_API_KEY` |
-| `openai` | OpenAI API (or compatible) | ✅ `OPENAI_API_KEY` |
-| `gemini` | Gemini API (or compatible) | ✅ `GEMINI_API_KEY` |
-| `deepseek` | Deepseek API (or compatible) | ✅ `DEEPSEEK_API_KEY` |
-| `custom` | Custom HTTP request | ✅ `CUSTOM_API_KEY` |
+| `ollama` | Local Ollama instance | No |
+| `ollama-cloud` | Ollama Cloud API | `OLLAMA_CLOUD_API_KEY` |
+| `openai` | OpenAI API (or compatible) | `OPENAI_API_KEY` |
+| `gemini` | Gemini API (or compatible) | `GEMINI_API_KEY` |
+| `deepseek` | Deepseek API (or compatible) | `DEEPSEEK_API_KEY` |
+| `custom` | Custom HTTP request | `CUSTOM_API_KEY` |
 
 ## Installation
 
-```bash
-pip install -r requirements.txt
+### From PyPI
 
-# Or install as a package
-pip3 install -e .
+```bash
+# Core package (Ollama + custom backends)
+pip install llm-fingerprinter
+
+# With OpenAI support
+pip install llm-fingerprinter[openai]
+
+# With Gemini support
+pip install llm-fingerprinter[gemini]
+
+# With all backends
+pip install llm-fingerprinter[all]
+```
+
+### From source (development)
+
+```bash
+git clone https://github.com/litemars/LLM-Fingerprinter.git
+cd LLM-Fingerprinter
+pip install -e ".[all,dev]"
 
 # Optional: Download NLTK data for text processing
 python -c "import nltk; nltk.download('punkt_tab'); nltk.download('stopwords')"
@@ -37,16 +58,15 @@ python -c "import nltk; nltk.download('punkt_tab'); nltk.download('stopwords')"
 
 ```bash
 # Identify model and fine-tuning
-
-llm-fingerprinter identify -b ollama --model some-model 
+llm-fingerprinter identify -b ollama --model some-model
 
 # Train your own classifier
 # Fingerprint the LLM
 llm-fingerprinter simulate --model llama3.2 --family llama
 # Train on the Fingerprints
 llm-fingerprinter train
-
 ```
+
 ### Custom - Interact with any LLM via HTTP request
 
 ```bash
@@ -89,6 +109,25 @@ export CUSTOM_API_KEY="your-key"
 llm-fingerprinter simulate -b custom -e http://your-api.com/v1 --model your-model --family llama
 ```
 
+## Python API
+
+You can also use the library programmatically:
+
+```python
+from llm_fingerprinter import LLMFingerprinter, EnsembleClassifier, FeatureExtractor, PromptSuite
+from llm_fingerprinter.ollama_client import OllamaClient
+
+# Setup components
+client = OllamaClient(endpoint="http://localhost:11434")
+suite = PromptSuite()
+extractor = FeatureExtractor()
+classifier = EnsembleClassifier()
+
+# Create fingerprinter and identify a model
+fingerprinter = LLMFingerprinter("http://localhost:11434", client, suite, extractor, classifier)
+fingerprint = fingerprinter.fingerprint_model("llama3.2")
+```
+
 ---
 
 ## Commands
@@ -112,7 +151,7 @@ llm-fingerprinter simulate [OPTIONS]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--model` | *required* | Model name |
-| `--family` | *required* | Family: `gpt`, `claude`, `llama`, `gemini`, `mistral`, `qwen`, `gemma` |
+| `--family` | *required* | Family: `gpt`, `llama`, `gemini`, `mistral`, `qwen`, `gemma` |
 | `--num-sims` | *optional* | Number of simulations |
 | `--repeats` | *optional* | Prompt repeats per simulation |
 
@@ -136,8 +175,16 @@ llm-fingerprinter simulate -b openai -e https://api.groq.com/openai/v1 -k $GROQ_
 Train classifier from saved fingerprints.
 
 ```bash
-llm-fingerprinter train [--augment/--no-augment]
+llm-fingerprinter train [--augment/--no-augment] [--cross-validate]
 ```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--augment/--no-augment` | `--augment` | Data augmentation |
+| `--use-pca` | off | Use PCA reduction |
+| `--pca-components` | 64 | PCA components |
+| `--cross-validate` / `-cv` | off | Run k-fold cross-validation |
+| `--cv-folds` | 5 | Number of CV folds |
 
 ### `identify`
 
@@ -147,7 +194,6 @@ Identify model family using trained classifier.
 llm-fingerprinter identify --model <model-name> [-b <backend>]
 ```
 
-# Other commands
 ### `list-models`
 
 List available models on the API.
@@ -184,7 +230,11 @@ llm-fingerprinter info
 | `DEEPSEEK_API_KEY` | deepseek | DeepSeek API key |
 | `CUSTOM_API_KEY` | custom | Custom API key |
 | `LOG_LEVEL` | all | Logging level (DEBUG, INFO, etc.) |
+| `LLM_FINGERPRINTER_DATA` | all | Custom data directory path |
 
+## Data Storage
+
+When installed via pip, runtime data (fingerprints, trained models, logs) is stored in `~/.llm-fingerprinter/`. You can override this with the `LLM_FINGERPRINTER_DATA` environment variable. When running from a git checkout, data is stored in the project directory (backward compatible).
 
 ## How It Works
 
@@ -208,4 +258,3 @@ Contributions are welcome! Whether you're adding support for new models, improvi
 ## License
 
 MIT License
-
