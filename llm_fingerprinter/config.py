@@ -80,14 +80,22 @@ LINGUISTIC_DIM = 12
 
 BEHAVIORAL_DIM = 6
 
-TOTAL_FEATURE_DIM = EMBEDDING_DIM + LINGUISTIC_DIM + BEHAVIORAL_DIM  # 402
-assert TOTAL_FEATURE_DIM == 402, (
-    f"Feature dimension mismatch: {EMBEDDING_DIM} + {LINGUISTIC_DIM} + {BEHAVIORAL_DIM} "
-    f"= {TOTAL_FEATURE_DIM}, expected 402"
-)
+PER_PROMPT_FEATURE_DIM = EMBEDDING_DIM + LINGUISTIC_DIM + BEHAVIORAL_DIM  # 402
+
+# Per-layer aggregation (3 prompt layers: stylistic, behavioral, discriminative)
+NUM_PROMPT_LAYERS = 3
+LAYER_ORDER = ['stylistic', 'behavioral', 'discriminative']
+RAW_FINGERPRINT_DIM = PER_PROMPT_FEATURE_DIM * NUM_PROMPT_LAYERS  # 1206
+
+# Embedding rebalancing: compress 384-dim embeddings to this per layer
+EMBEDDING_PCA_DIM = 64
 
 # PCA target dimension (should be <= min samples or total features)
 PCA_DIM = 64
+
+# OOD detection thresholds
+OOD_CONFIDENCE_THRESHOLD = 0.3
+OOD_DISAGREEMENT_THRESHOLD = 0.15
 
 # Prompt suite
 PROMPT_REPEATS = 2

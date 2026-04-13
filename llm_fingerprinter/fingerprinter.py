@@ -128,16 +128,34 @@ class LLMFingerprinter:
             logger.error("No features extracted!")
             return None
 
-        X_features = np.array(all_features, dtype=np.float32)
-        logger.info(f"Extracted feature matrix: {X_features.shape}")
+        # Group features by prompt layer for per-layer aggregation
+        layer_order = ['stylistic', 'behavioral', 'discriminative']
+        layer_features = {layer: [] for layer in layer_order}
+        for feat, resp_info in zip(all_features, all_responses):
+            layer = resp_info.get('layer', 'unknown')
+            if layer in layer_features:
+                layer_features[layer].append(feat)
+            else:
+                logger.warning(f"Unknown layer '{layer}', assigning to stylistic")
+                layer_features['stylistic'].append(feat)
 
-        # Average across all queries to get single fingerprint vector
-        # NO PCA - return raw features (402-dim)
-        fingerprint_vector = X_features.mean(axis=0)
-        
-        logger.info(f"Fingerprint vector: {fingerprint_vector.shape[0]} dimensions (raw features)")
+        # Average per layer, then concatenate
+        feat_dim = self.extractor.get_feature_dim()
+        layer_averages = []
+        for layer_name in layer_order:
+            feats = layer_features[layer_name]
+            if feats:
+                layer_avg = np.mean(feats, axis=0).astype(np.float32)
+            else:
+                logger.warning(f"No features for layer '{layer_name}', using zeros")
+                layer_avg = np.zeros(feat_dim, dtype=np.float32)
+            layer_averages.append(layer_avg)
 
-        # Calculate feature indices for raw features breakdown
+        fingerprint_vector = np.concatenate(layer_averages)
+        logger.info(f"Fingerprint vector: {fingerprint_vector.shape[0]} dimensions "
+                    f"({len(layer_order)} layers x {feat_dim} features)")
+
+        # Calculate feature indices for per-layer raw features breakdown
         embed_dim = self.extractor.embedding_dim
         ling_dim = self.extractor.LINGUISTIC_DIM
         behav_dim = self.extractor.BEHAVIORAL_DIM
@@ -145,15 +163,29 @@ class LLMFingerprinter:
         # Package results
         elapsed = time.time() - start_time
 
+        # Build per-layer raw features
+        raw_features = {}
+        for layer_name in layer_order:
+            feats = layer_features[layer_name]
+            if feats:
+                feats_array = np.array(feats, dtype=np.float32)
+                raw_features[layer_name] = {
+                    'embeddings': feats_array[:, :embed_dim].mean(axis=0).astype(np.float32),
+                    'linguistic': feats_array[:, embed_dim:embed_dim+ling_dim].mean(axis=0).astype(np.float32),
+                    'behavioral': feats_array[:, embed_dim+ling_dim:embed_dim+ling_dim+behav_dim].mean(axis=0).astype(np.float32),
+                }
+            else:
+                raw_features[layer_name] = {
+                    'embeddings': np.zeros(embed_dim, dtype=np.float32),
+                    'linguistic': np.zeros(ling_dim, dtype=np.float32),
+                    'behavioral': np.zeros(behav_dim, dtype=np.float32),
+                }
+
         result = {
             'model': model_name,
             'timestamp': datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             'vector': fingerprint_vector.astype(np.float32),
-            'raw_features': {
-                'embeddings': X_features[:, :embed_dim].mean(axis=0).astype(np.float32),
-                'linguistic': X_features[:, embed_dim:embed_dim+ling_dim].mean(axis=0).astype(np.float32),
-                'behavioral': X_features[:, embed_dim+ling_dim:embed_dim+ling_dim+behav_dim].mean(axis=0).astype(np.float32),
-            },
+            'raw_features': raw_features,
             'metadata': {
                 'endpoint': self.endpoint,
                 'duration_seconds': round(elapsed, 2),
@@ -163,6 +195,7 @@ class LLMFingerprinter:
                 'feature_dim': fingerprint_vector.shape[0],
                 'prompt_count': len(prompts),
                 'repeats': repeats,
+                'layers': {name: len(layer_features[name]) for name in layer_order},
             },
             'responses_sample': all_responses[:5],
         }
@@ -246,8 +279,8 @@ class LLMFingerprinter:
                 'error': 'Fingerprinting failed'
             }
 
-        # Classify using raw features - classifier handles PCA internally if needed
-        family, confidence, all_probs = self.classifier.predict_with_confidence(fp['vector'])
+        # Classify using raw features - classifier handles rebalancing/PCA internally
+        family, confidence, all_probs, ood_info = self.classifier.predict_with_confidence(fp['vector'])
 
         if family is None:
             return {
@@ -256,13 +289,21 @@ class LLMFingerprinter:
                 'fingerprint': fp
             }
 
+        is_ood = ood_info.get('is_ood', False)
         result = {
             'model': model_name,
-            'family': family,
+            'family': 'unknown' if is_ood else family,
+            'predicted_family': family,
             'confidence': round(confidence, 4),
             'all_probabilities': {k: round(v, 4) for k, v in all_probs.items()},
+            'ood_detected': is_ood,
+            'ood_details': ood_info,
             'fingerprint': fp,
         }
 
-        logger.info(f"Identified as {family} ({confidence*100:.1f}% confidence)")
+        if is_ood:
+            logger.warning(f"OOD detected for {model_name}: best guess {family} "
+                          f"({confidence*100:.1f}% confidence)")
+        else:
+            logger.info(f"Identified as {family} ({confidence*100:.1f}% confidence)")
         return result

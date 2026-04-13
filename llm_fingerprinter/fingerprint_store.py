@@ -175,34 +175,63 @@ class FingerprintStore:
 
         vector = data.get("vector")
         raw_features = data.get("raw_features", {})
-        
+
+        # Use stored vector directly if available
         if vector is not None and len(vector) >= 400:
             return vector
-        
+
+        # Try per-layer reconstruction (new format)
+        layer_order = ['stylistic', 'behavioral', 'discriminative']
+        if any(layer in raw_features for layer in layer_order):
+            layer_vectors = []
+            for layer_name in layer_order:
+                layer_data = raw_features.get(layer_name, {})
+                embeddings = layer_data.get("embeddings")
+                linguistic = layer_data.get("linguistic")
+                behavioral = layer_data.get("behavioral")
+
+                if embeddings is None:
+                    logger.warning(f"No embeddings for layer '{layer_name}'")
+                    return None
+
+                parts = []
+                for arr in [embeddings, linguistic, behavioral]:
+                    if arr is not None:
+                        if not isinstance(arr, np.ndarray):
+                            arr = np.array(arr, dtype=np.float32)
+                        parts.append(arr)
+
+                layer_vectors.append(np.concatenate(parts))
+
+            full_vector = np.concatenate(layer_vectors)
+            logger.debug(f"Reconstructed per-layer vector: {len(full_vector)} dims")
+            return full_vector
+
+        # Fallback: old flat format
         embeddings = raw_features.get("embeddings")
         linguistic = raw_features.get("linguistic")
         behavioral = raw_features.get("behavioral")
-        
+
         if embeddings is None:
             logger.warning("No embeddings found in raw_features")
             return None
-        
+
         if not isinstance(embeddings, np.ndarray):
             embeddings = np.array(embeddings, dtype=np.float32)
-        
+
         if linguistic is None or behavioral is None:
             logger.debug(f"Only embeddings available: {len(embeddings)} dims")
             return embeddings
-        
+
         if not isinstance(linguistic, np.ndarray):
             linguistic = np.array(linguistic, dtype=np.float32)
         if not isinstance(behavioral, np.ndarray):
             behavioral = np.array(behavioral, dtype=np.float32)
-        
+
         full_vector = np.concatenate([embeddings, linguistic, behavioral])
         logger.debug(f"Reconstructed full vector: {len(full_vector)} dims "
                     f"({len(embeddings)} + {len(linguistic)} + {len(behavioral)})")
-        
+
         return full_vector
 
     def export_for_training(self):

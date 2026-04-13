@@ -111,10 +111,21 @@ def print_report(result: dict):
 
     family = result.get('family', 'Unknown')
     confidence = result.get('confidence', 0.0)
-    
-    conf_color = 'green' if confidence > 0.7 else 'yellow' if confidence > 0.4 else 'red'
-    click.echo(f"\n  Identified: {click.style(family.upper(), fg=conf_color, bold=True)}")
-    click.echo(f"  Confidence: {click.style(f'{confidence*100:.1f}%', fg=conf_color)}")
+    is_ood = result.get('ood_detected', False)
+
+    if is_ood:
+        click.echo(click.style(f"\n  ⚠️  OUT-OF-DISTRIBUTION DETECTED", fg='yellow', bold=True))
+        predicted = result.get('predicted_family', '?')
+        click.echo(f"  Best guess: {click.style(predicted.upper(), fg='yellow')}")
+        click.echo(f"  Confidence: {click.style(f'{confidence*100:.1f}%', fg='red')}")
+        ood_details = result.get('ood_details', {})
+        agreement = ood_details.get('agreement_ratio', 0)
+        click.echo(f"  Classifier agreement: {agreement*100:.0f}%")
+        click.echo(click.style("  Model may not match any known family", fg='yellow'))
+    else:
+        conf_color = 'green' if confidence > 0.7 else 'yellow' if confidence > 0.4 else 'red'
+        click.echo(f"\n  Identified: {click.style(family.upper(), fg=conf_color, bold=True)}")
+        click.echo(f"  Confidence: {click.style(f'{confidence*100:.1f}%', fg=conf_color)}")
 
     all_probs = result.get('all_probabilities', {})
     if all_probs:
@@ -122,7 +133,7 @@ def print_report(result: dict):
         for fam, prob in sorted(all_probs.items(), key=lambda x: -x[1])[:5]:
             bar = "█" * int(prob * 25)
             click.echo(f"    {fam:12s} {prob*100:5.1f}% {bar}")
-    
+
     click.echo("=" * 60)
 
 
@@ -342,7 +353,7 @@ def train(ctx, augment, use_pca, pca_components, cross_validate, cv_folds):
     print_header()
     logger = ctx.obj['logger']
 
-    mode = f"PCA ({pca_components} components)" if use_pca else "raw features (402-dim)"
+    mode = f"PCA ({pca_components} components)" if use_pca else "rebalanced features (per-layer)"
     click.echo(f"🔧 Training mode: {mode}")
 
     try:
@@ -516,8 +527,10 @@ def info():
     click.echo("⚙️  Config:")
     click.echo(f"  Fingerprints: {config.FINGERPRINTS_DIR}")
     click.echo(f"  Embedding:    {config.EMBEDDING_MODEL} ({config.EMBEDDING_DIM}d)")
-    click.echo(f"  Total dims:   {config.TOTAL_FEATURE_DIM} (384 + 12 + 6)")
-    
+    click.echo(f"  Per-prompt:   {config.PER_PROMPT_FEATURE_DIM}d (384 + 12 + 6)")
+    click.echo(f"  Fingerprint:  {config.RAW_FINGERPRINT_DIM}d ({config.NUM_PROMPT_LAYERS} layers x {config.PER_PROMPT_FEATURE_DIM})")
+    click.echo(f"  Rebalanced:   {config.EMBEDDING_PCA_DIM}d embeddings per layer")
+
     click.echo(f"\n🔌 Backends:")
     click.echo(f"  ollama:       {config.OLLAMA_DEFAULT_ENDPOINT}")
     click.echo(f"  ollama-cloud: {config.OLLAMA_CLOUD_DEFAULT_ENDPOINT}")
@@ -548,8 +561,8 @@ def info():
         click.echo(f"  Classifier:   ❌ not trained")
     
     click.echo(f"\n💡 Training options:")
-    click.echo(f"  train              # Use raw 402-dim features (default)")
-    click.echo(f"  train --use-pca    # Use PCA reduction (64 dims)")
+    click.echo(f"  train              # Rebalanced per-layer features (default)")
+    click.echo(f"  train --use-pca    # Additional global PCA reduction")
 
 
 @cli.command()
