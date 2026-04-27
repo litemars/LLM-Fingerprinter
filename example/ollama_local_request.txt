@@ -1,5 +1,5 @@
 http://localhost:11434/api/generate
 {
-  "model": "gemma3:1b",
+  "model": "qwen3:4b",
   "prompt": "$PROMPT$"
 }

@@ -54,6 +54,8 @@ FINGERPRINTS_DIR = BASE_DIR / "fingerprints"
 TRAINING_DIR = FINGERPRINTS_DIR / "training"   # simulation data for training
 RESULTS_DIR = FINGERPRINTS_DIR / "results"     # inference/identification results
 MODEL_DIR = BASE_DIR / "model"
+TEMPLATES_PATH = MODEL_DIR / "templates.joblib"
+MODEL_TEMPLATES_PATH = MODEL_DIR / "model_templates.joblib"
 LOGS_DIR = BASE_DIR / "logs"
 
 # Bundled pre-trained model (shipped with the package)
@@ -82,9 +84,8 @@ BEHAVIORAL_DIM = 6
 
 PER_PROMPT_FEATURE_DIM = EMBEDDING_DIM + LINGUISTIC_DIM + BEHAVIORAL_DIM  # 402
 
-# Per-layer aggregation (3 prompt layers: stylistic, behavioral, discriminative)
 NUM_PROMPT_LAYERS = 3
-LAYER_ORDER = ['stylistic', 'behavioral', 'discriminative']
+LAYER_ORDER = ['discriminative', 'behavioral', 'stylistic']
 RAW_FINGERPRINT_DIM = PER_PROMPT_FEATURE_DIM * NUM_PROMPT_LAYERS  # 1206
 
 # Embedding rebalancing: compress 384-dim embeddings to this per layer
@@ -98,7 +99,7 @@ OOD_CONFIDENCE_THRESHOLD = 0.3
 OOD_DISAGREEMENT_THRESHOLD = 0.15
 
 # Prompt suite
-PROMPT_REPEATS = 2
+PROMPT_REPEATS = 1
 TEMPERATURE = 0.7
 MAX_TOKENS = 512
 REQUEST_TIMEOUT = 60

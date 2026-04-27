@@ -2,6 +2,7 @@ llm-fingerprinting
 fingerprinting
 fingerprints/
 logs
+tests
 .DS_Store
 __pycache__
 *.pyc
@@ -29,6 +30,7 @@ htmlcov/
 *.swp
 *.swo
 *~
+*
 
 # PyPI packaging
 *.tar.gz

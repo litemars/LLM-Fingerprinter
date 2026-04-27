@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Dict
 import numpy as np
 
+from llm_fingerprinter import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -181,7 +183,7 @@ class FingerprintStore:
             return vector
 
         # Try per-layer reconstruction (new format)
-        layer_order = ['stylistic', 'behavioral', 'discriminative']
+        layer_order = config.LAYER_ORDER
         if any(layer in raw_features for layer in layer_order):
             layer_vectors = []
             for layer_name in layer_order:
@@ -233,6 +235,50 @@ class FingerprintStore:
                     f"({len(embeddings)} + {len(linguistic)} + {len(behavioral)})")
 
         return full_vector
+
+    def export_by_model(self):
+        """Export fingerprints grouped by exact model name.
+
+        Reads the 'model_name' field from metadata (set by the simulate command).
+        Falls back to the top-level 'model' field for older fingerprints.
+
+        Returns:
+            Dict mapping model_name -> list of vectors (same format as
+            export_for_training but keyed by specific model instead of family).
+        """
+        model_data = {}
+
+        for filepath in self.list_fingerprints():
+            data = self.load_fingerprint(str(filepath))
+            if not data:
+                continue
+
+            # Prefer the clean model_name stored in metadata (new format).
+            # Older fingerprints only have a save_name in the top-level 'model'
+            # field (e.g. "llama3_2_llama_sim0_t50") — not a usable model name,
+            # so we skip them rather than pollute the template store.
+            model_name = (data.get('metadata') or {}).get('model_name')
+            if not model_name:
+                logger.debug(
+                    f"Skipping {filepath}: no 'model_name' in metadata "
+                    f"(pre-dates model-level tracking). Re-run 'simulate' to include."
+                )
+                continue
+
+            vector = self._get_full_vector(data)
+            if vector is None:
+                logger.warning(f"Skipping {filepath}: could not get full vector")
+                continue
+
+            if model_name not in model_data:
+                model_data[model_name] = []
+            model_data[model_name].append(vector)
+
+        for model_name, vectors in model_data.items():
+            logger.info(f"Exported model '{model_name}': {len(vectors)} samples, "
+                        f"{len(vectors[0])} dims each")
+
+        return model_data
 
     def export_for_training(self):
         training_data = {}
