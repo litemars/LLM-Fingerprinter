@@ -1,6 +1,7 @@
 import numpy as np
 import logging
 from sklearn.ensemble import RandomForestClassifier
+from llm_fingerprinter import config
 from sklearn.svm import SVC
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
@@ -81,30 +82,37 @@ class EnsembleClassifier:
                     f"embedding rebalancing {embedding_pca_dim}d")
 
     def _augment_samples(self, X: np.ndarray, y: np.ndarray):
-        """Augment training data by adding Gaussian noise, clipped to observed ranges."""
+        """Augment training data with additive Gaussian noise scaled to each
+        feature's standard deviation, clipped to the observed per-feature range.
+
+        Using std-scaled additive noise (not multiplicative) ensures that
+        near-zero features (e.g. refusal_score for non-refusing models) are
+        still perturbed — multiplicative noise would leave them unchanged.
+        """
         if not self.augment_data or len(X) == 0:
             return X, y
 
-        # Compute per-feature bounds from original data to prevent invalid values
-        X_min = X.min(axis=0)
-        X_max = X.max(axis=0)
+        X_min  = X.min(axis=0)
+        X_max  = X.max(axis=0)
+        X_std  = X.std(axis=0)          # per-feature spread of real training data
+        # Fall back to a small absolute value where std is zero (constant feature)
+        X_std  = np.where(X_std > 0, X_std, 1e-6)
 
         X_aug_list = [X]
         y_aug_list = [y]
 
         for _ in range(self.augment_samples):
-            noise = np.random.normal(0, self.augment_noise_std, X.shape)
-            X_noisy = X + noise * np.abs(X)
-            # Clip to observed training range to prevent impossible values
-            # (e.g., negative refusal scores, TTR > 1)
-            X_noisy = np.clip(X_noisy, X_min, X_max)
+            noise    = np.random.normal(0, self.augment_noise_std, X.shape)
+            X_noisy  = X + noise * X_std
+            # Clip to observed range to prevent impossible values
+            X_noisy  = np.clip(X_noisy, X_min, X_max)
             X_aug_list.append(X_noisy)
             y_aug_list.append(y)
 
         X_aug = np.vstack(X_aug_list)
         y_aug = np.concatenate(y_aug_list)
 
-        logger.info(f"Augmented {len(X)} -> {len(X_aug)} samples")
+        logger.info(f"Augmented {len(X)} → {len(X_aug)} samples")
         return X_aug, y_aug
 
     def _rebalance_features(self, X: np.ndarray, fit: bool = False):
@@ -114,9 +122,10 @@ class EnsembleClassifier:
         Output: (n_samples, n_layers * (embedding_pca_dim + non_embed_dim)) e.g. (N, 246)
         """
         n_features = X.shape[1]
+        assert n_features % self.n_layers == 0, \
+            f"Feature dim {n_features} not divisible by n_layers {self.n_layers}"
         per_layer_dim = n_features // self.n_layers
-        # 18 non-embedding features per layer (12 linguistic + 6 behavioral)
-        non_embed_dim = 18
+        non_embed_dim = config.LINGUISTIC_DIM + config.BEHAVIORAL_DIM  # 18
         embed_dim = per_layer_dim - non_embed_dim
 
         if fit:
@@ -214,7 +223,13 @@ class EnsembleClassifier:
             self.svm.fit(X_processed, y_train)
             
             logger.info("Training MLP...")
-            self.mlp.fit(X_processed, y_train)
+            # MLPClassifier has no class_weight param — pass balanced sample
+            # weights so it gets the same imbalance handling as RF and SVM.
+            classes, counts = np.unique(y_train, return_counts=True)
+            class_weight = len(y_train) / (len(classes) * counts)
+            sample_weight = np.array([class_weight[np.where(classes == c)[0][0]]
+                                      for c in y_train])
+            self.mlp.fit(X_processed, y_train, sample_weight=sample_weight)
 
             self.is_trained = True
             logger.info("Training complete")

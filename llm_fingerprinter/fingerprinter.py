@@ -132,9 +132,10 @@ class LLMFingerprinter:
             layer_prompts = prompts_by_layer[layer_name]
             logger.debug(f"Layer '{layer_name}': {len(layer_prompts)} prompts × {repeats} repeats")
 
+            # ── Phase 1: collect API responses (sequential) ───────────────────
+            layer_pairs = []   # (prompt_text, response, prompt_dict)
             for prompt_dict in layer_prompts:
                 prompt = prompt_dict['text']
-
                 for rep in range(repeats):
                     try:
                         response = self.client.generate(
@@ -143,15 +144,7 @@ class LLMFingerprinter:
                             temperature=temperature,
                             max_tokens=512
                         )
-                        all_responses.append({
-                            'prompt': prompt,
-                            'response': response,
-                            'layer': layer_name,
-                            'category': prompt_dict.get('category', 'unknown'),
-                        })
-
-                        features = self.extractor.extract(prompt, response)
-                        layer_features[layer_name].append(features)
+                        layer_pairs.append((prompt, response, prompt_dict))
                         query_count += 1
                         consecutive_errors = 0
 
@@ -176,6 +169,20 @@ class LLMFingerprinter:
 
                 if consecutive_errors >= max_errors:
                     break
+
+            # ── Phase 2: batch-extract features (single embedding forward pass)
+            if layer_pairs:
+                features_batch = self.extractor.extract_batch(
+                    [(p, r) for p, r, _ in layer_pairs]
+                )
+                for (prompt, response, pd), features in zip(layer_pairs, features_batch):
+                    all_responses.append({
+                        'prompt': prompt,
+                        'response': response,
+                        'layer': layer_name,
+                        'category': pd.get('category', 'unknown'),
+                    })
+                    layer_features[layer_name].append(features)
 
             completed_layers.append(layer_name)
             logger.info(f"Layer '{layer_name}' done "

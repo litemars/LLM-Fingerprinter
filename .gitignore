@@ -30,7 +30,6 @@ htmlcov/
 *.swp
 *.swo
 *~
-*
 
 # PyPI packaging
 *.tar.gz

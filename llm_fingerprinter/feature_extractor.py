@@ -5,23 +5,27 @@ import re
 logger = logging.getLogger(__name__)
 
 def _setup_nltk():
+    """Ensure NLTK data packages are present, downloading only if missing."""
     import nltk
-    
+
     packages_to_try = ['punkt_tab', 'punkt', 'stopwords']
-    
     for package in packages_to_try:
         try:
-            nltk.download(package, quiet=True)
-        except Exception as e:
-            logger.debug(f"Note: NLTK {package} download: {e}")
-    
+            # Check if already downloaded — avoids a network call on every import
+            nltk.data.find(f"tokenizers/{package}" if package != 'stopwords'
+                           else "corpora/stopwords")
+        except LookupError:
+            try:
+                nltk.download(package, quiet=True)
+            except Exception as e:
+                logger.debug(f"NLTK {package} download failed: {e}")
+
     try:
         from nltk.tokenize import sent_tokenize, word_tokenize
-        # Test that tokenization works
         sent_tokenize("Test sentence.")
         word_tokenize("Test words.")
     except Exception as e:
-        logger.warning(f"NLTK tokenizer test failed: {e}. Will use fallback tokenization.")
+        logger.warning(f"NLTK tokenizer unavailable, will use fallback: {e}")
 
 _setup_nltk()
 
@@ -108,6 +112,52 @@ class FeatureExtractor:
         logger.info(f"Initialized FeatureExtractor with {model_name} "
                    f"(embedding dim: {self.embedding_dim})")
     
+    def extract_batch(self, prompt_response_pairs: list) -> list:
+        """Extract features for multiple (prompt, response) pairs efficiently.
+
+        Batches the embedding step (the expensive GPU/CPU forward pass) so that
+        N responses are encoded in one call instead of N separate calls.
+        Linguistic and behavioral features are still computed per-response
+        (they are pure Python and not the bottleneck).
+
+        Args:
+            prompt_response_pairs: list of (prompt_str, response_str) tuples
+
+        Returns:
+            List of np.ndarray, one per pair, in the same order.
+            Zero-vectors are returned for empty/failed responses.
+        """
+        if not prompt_response_pairs:
+            return []
+
+        total_dim = self.embedding_dim + self.LINGUISTIC_DIM + self.BEHAVIORAL_DIM
+        responses = [r for _, r in prompt_response_pairs]
+
+        # --- Batch encode all responses in one forward pass ---
+        try:
+            embeddings = self.embedding_model.encode(
+                responses,
+                batch_size=32,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            ).astype(np.float32)
+        except Exception as e:
+            logger.error(f"Batch embedding failed, falling back per-response: {e}")
+            embeddings = np.stack([
+                self._embedding_features(r) for r in responses
+            ])
+
+        results = []
+        for (prompt, response), embedding in zip(prompt_response_pairs, embeddings):
+            if not response or not response.strip():
+                results.append(np.zeros(total_dim, dtype=np.float32))
+                continue
+            ling = self._linguistic_features(response)
+            beh  = self._behavioral_features(prompt, response)
+            results.append(np.concatenate([embedding, ling, beh]))
+
+        return results
+
     def extract(self, prompt: str, response: str):
 
         if not response or not response.strip():

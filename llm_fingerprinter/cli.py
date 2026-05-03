@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 from datetime import datetime
 
+import numpy as np
+
 from llm_fingerprinter.ollama_client import OllamaClient
 from llm_fingerprinter.openai_client import OpenAIClient, OpenAIAuthError
 from llm_fingerprinter.ollama_cloud_client import OllamaCloudClient, OllamaCloudAuthError
@@ -48,12 +50,13 @@ def setup_logging(verbose: bool = False):
 
 def get_default_endpoint(backend):
     return {
-        "ollama": config.OLLAMA_DEFAULT_ENDPOINT,
+        "ollama":       config.OLLAMA_DEFAULT_ENDPOINT,
         "ollama-cloud": config.OLLAMA_CLOUD_DEFAULT_ENDPOINT,
-        "openai": config.OPENAI_DEFAULT_ENDPOINT,
-        "deepseek": config.DEEPSEEK_DEFAULT_ENDPOINT,
-        "gemini": config.GEMINI_DEFAULT_ENDPOINT,
-    }.get(backend, config.DEFAULT_BACKEND)
+        "openai":       config.OPENAI_DEFAULT_ENDPOINT,
+        "deepseek":     config.DEEPSEEK_DEFAULT_ENDPOINT,
+        "gemini":       config.GEMINI_DEFAULT_ENDPOINT,
+        "custom":       config.CUSTOM_DEFAULT_ENDPOINT,
+    }.get(backend, config.CUSTOM_DEFAULT_ENDPOINT)
 
 
 def get_api_client(backend, endpoint, api_key = None, request_file = None):
@@ -393,7 +396,6 @@ def simulate(ctx, backend, endpoint, api_key, request_file, model, family, num_s
         model_display = model or "default"
         click.echo(f"\n🔄 Running {num_sims} simulations for {model_display} ({family})...")
 
-        import numpy as np
         temperatures = np.linspace(0.0, 1.0, num_sims).tolist() if num_sims > 1 else [config.TEMPERATURE]
         click.echo(f"   Temperatures: {[round(t, 2) for t in temperatures]}")
 
