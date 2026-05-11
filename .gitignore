@@ -31,6 +31,12 @@ htmlcov/
 .tox/
 *.swp
 *.swo
+TODO
+benchmark_results.json
+benchmark.py
+analyze_features.py
+analyze_results.py
+produce*
 *~
 # PyPI packaging
 *.tar.gz
