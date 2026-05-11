@@ -19,33 +19,41 @@ PACKAGE_DIR = Path(__file__).parent
 
 MODEL_FAMILIES = {
     "gpt": 0,
-    "gemma": 1,
+    "qwen": 1,
     "llama": 2,
     "gemini": 3,
-    "mistral": 4,
-    "qwen": 5,
+    "mistral": 4
 }
+
+
+def _find_project_root() -> Path:
+    """Walk up from CWD to find the project root.
+
+    Looks for setup.py or .git as markers. This works correctly whether
+    the package is installed normally (pip install .), in editable mode
+    (pip install -e .), or run directly — because CWD is always where
+    the user launched the command from, not inside the venv.
+    """
+    for path in [Path.cwd(), *Path.cwd().parents]:
+        if (path / "setup.py").exists() or (path / ".git").exists():
+            return path
+    # Fallback: CWD itself (user may be running from project root directly)
+    return Path.cwd()
 
 
 def _get_data_dir() -> Path:
     """Get the data directory for runtime files.
 
-    Uses LLM_FINGERPRINTER_DATA env var if set, otherwise:
-    - If running from a git checkout (has .git or .gitignore in parent),
-      uses the project root (backward compatible).
-    - Otherwise uses ~/.llm-fingerprinter/ as the user data directory.
+    Uses LLM_FINGERPRINTER_DATA env var if set, otherwise finds the
+    project root by walking up from the current working directory.
+
+    Override with the LLM_FINGERPRINTER_DATA env var if needed.
     """
     env_dir = os.environ.get("LLM_FINGERPRINTER_DATA")
     if env_dir:
         return Path(env_dir)
 
-    # Check if we're in a development/git checkout
-    project_root = PACKAGE_DIR.parent
-    if (project_root / ".git").exists() or (project_root / ".gitignore").exists():
-        return project_root
-
-    # Installed via pip - use a user data directory
-    return Path.home() / ".llm-fingerprinter"
+    return _find_project_root()
 
 
 # Paths

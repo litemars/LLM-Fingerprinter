@@ -5,8 +5,20 @@ import re
 logger = logging.getLogger(__name__)
 
 def _setup_nltk():
-    """Ensure NLTK data packages are present, downloading only if missing."""
+    """Ensure NLTK data packages are present, downloading only if missing.
+
+    Data is stored in llm_fingerprinter/nltk_data/ — next to this file —
+    keeping everything self-contained within the project directory.
+    """
     import nltk
+    from pathlib import Path
+
+    # Store NLTK data alongside this file: llm_fingerprinter/nltk_data/
+    nltk_data_dir = str(Path(__file__).parent / "nltk_data")
+
+    # Prepend so it's checked first, before any system/home locations
+    if nltk_data_dir not in nltk.data.path:
+        nltk.data.path.insert(0, nltk_data_dir)
 
     packages_to_try = ['punkt_tab', 'punkt', 'stopwords']
     for package in packages_to_try:
@@ -16,7 +28,7 @@ def _setup_nltk():
                            else "corpora/stopwords")
         except LookupError:
             try:
-                nltk.download(package, quiet=True)
+                nltk.download(package, download_dir=nltk_data_dir, quiet=True)
             except Exception as e:
                 logger.debug(f"NLTK {package} download failed: {e}")
 
@@ -94,7 +106,7 @@ def _get_stopwords():
 class FeatureExtractor:
     
     LINGUISTIC_DIM = 12
-    BEHAVIORAL_DIM = 6
+    BEHAVIORAL_DIM = 6 
     
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         """

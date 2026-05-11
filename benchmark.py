@@ -63,6 +63,7 @@ class ModelSpec:
     family: str
     endpoint: str
     backend: str = "custom"
+    api_key: Optional[str] = None
 
 
 @dataclass
@@ -92,30 +93,31 @@ class BenchmarkSummary:
 
 # ── Client factory ─────────────────────────────────────────────────────────────
 
-def build_client(endpoint: str, backend: str):
+def build_client(endpoint: str, backend: str, api_key: Optional[str] = None):
+    """Build an API client. api_key from the model spec takes priority over env vars."""
     if backend == "ollama":
         from llm_fingerprinter.ollama_client import OllamaClient
         return OllamaClient(endpoint)
     elif backend == "ollama-cloud":
         from llm_fingerprinter.ollama_cloud_client import OllamaCloudClient
-        api_key = os.environ.get("OLLAMA_CLOUD_API_KEY", "")
-        return OllamaCloudClient(endpoint, api_key=api_key)
+        key = api_key or os.environ.get("OLLAMA_CLOUD_API_KEY", "")
+        return OllamaCloudClient(key, endpoint=endpoint)
     elif backend == "openai":
         from llm_fingerprinter.openai_client import OpenAIClient
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        return OpenAIClient(endpoint, api_key=api_key)
+        key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        return OpenAIClient(key, endpoint=endpoint)
     elif backend == "deepseek":
         from llm_fingerprinter.deepseek_client import DeepSeekClient
-        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-        return DeepSeekClient(endpoint, api_key=api_key)
+        key = api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+        return DeepSeekClient(key, endpoint=endpoint)
     elif backend == "gemini":
         from llm_fingerprinter.gemini_client import GeminiClient
-        api_key = os.environ.get("GEMINI_API_KEY", "")
-        return GeminiClient(endpoint, api_key=api_key)
+        key = api_key or os.environ.get("GEMINI_API_KEY", "")
+        return GeminiClient(key, endpoint=endpoint)
     else:
         from llm_fingerprinter.custom_client import CustomClient
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        return CustomClient(endpoint, api_key=api_key)
+        key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        return CustomClient(api_key=key)
 
 
 # ── Strategy runners ───────────────────────────────────────────────────────────
@@ -358,6 +360,34 @@ def main():
     print(f"\nLoaded {len(model_specs)} test model(s) from {args.models_file}")
     print(f"Strategies: {', '.join(args.strategies)}\n")
 
+    # ── Validate API keys before touching any endpoint ─────────────────────────
+    KEY_ENV: dict[str, str] = {
+        "openai":       "OPENAI_API_KEY",
+        "ollama-cloud": "OLLAMA_CLOUD_API_KEY",
+        "deepseek":     "DEEPSEEK_API_KEY",
+        "gemini":       "GEMINI_API_KEY",
+    }
+    missing = []
+    for spec in model_specs:
+        env_var = KEY_ENV.get(spec.backend)
+        if env_var and not spec.api_key and not os.environ.get(env_var):
+            missing.append(f"  {spec.name} ({spec.backend}) — set {env_var} or add \"api_key\" to {args.models_file}")
+    if missing:
+        print("ERROR: Missing API keys for the following models:")
+        for m in missing:
+            print(m)
+        print()
+        sys.exit(1)
+
+    # Show which key source is being used (masked)
+    for spec in model_specs:
+        env_var = KEY_ENV.get(spec.backend)
+        if env_var:
+            key_val = spec.api_key or os.environ.get(env_var, "")
+            source  = "models file" if spec.api_key else f"${env_var}"
+            masked  = key_val[:8] + "..." if len(key_val) > 8 else "(empty!)"
+            print(f"  {spec.name}: using key from {source} ({masked})")
+
     # ── Load classifier ────────────────────────────────────────────────────────
     classifier = EnsembleClassifier()
     if not classifier.load(args.classifier_path):
@@ -381,7 +411,7 @@ def main():
     for spec in model_specs:
         key = f"{spec.endpoint}::{spec.backend}"
         if key not in fingerprinters:
-            client = build_client(spec.endpoint, spec.backend)
+            client = build_client(spec.endpoint, spec.backend, spec.api_key)
             fingerprinters[key] = LLMFingerprinter(
                 endpoint=spec.endpoint,
                 ollama_client=client,

@@ -64,14 +64,25 @@ class TemplateClassifier:
         self.ood_ratio_threshold = ood_ratio_threshold
         self._ood_radius: float | None = None         # calibrated from training
         self.is_built = False
+        # Optional model_name -> family mapping (populated by build-model-templates).
+        # When present, classify() returns an inferred_family so that identify()
+        # can recover the correct family even when the ensemble is OOD.
+        self.model_families: dict[str, str] = {}
 
     # ── Build / update ───────────────────────────────────────────────────────
 
-    def build(self, simulation_data: dict) -> bool:
+    def build(self, simulation_data: dict,
+              model_families: dict = None) -> bool:
         """Compute per-family class-mean template from training fingerprints.
 
         Args:
             simulation_data: dict mapping family_name -> list[np.ndarray]
+            model_families:  Optional dict mapping model_name -> family (str).
+                             When provided, classify() can return an
+                             inferred_family for the winning model even when
+                             the caller only knows the model name, not the
+                             family.  Pass the result of
+                             FingerprintStore.export_model_family_map().
 
         Returns:
             True on success.
@@ -81,6 +92,7 @@ class TemplateClassifier:
             return False
 
         self.templates = {}
+        self.model_families = model_families or {}
         intra_distances: list[float] = []
 
         for family, vectors in simulation_data.items():
@@ -200,6 +212,11 @@ class TemplateClassifier:
         # Confidence: invert cosine distance (0 = perfect match → 1.0 confidence)
         confidence = float(max(0.0, 1.0 - best["distance"] / 2.0))
 
+        # If a model_name -> family mapping was provided at build time, look up
+        # the family for the winning model so callers can use it as a fallback
+        # when the ensemble classifier is OOD but the model template is not.
+        inferred_family = self.model_families.get(best["family"]) if not is_ood else None
+
         return {
             "family": "unknown" if is_ood else best["family"],
             "predicted_family": best["family"],
@@ -208,6 +225,7 @@ class TemplateClassifier:
             "ranked": ranked,
             "is_ood": is_ood,
             "ood_reason": ood_reason,
+            "inferred_family": inferred_family,
         }
 
     # ── Persistence ──────────────────────────────────────────────────────────
@@ -221,6 +239,7 @@ class TemplateClassifier:
                     "ood_ratio_threshold": self.ood_ratio_threshold,
                     "ood_radius": self._ood_radius,
                     "is_built": self.is_built,
+                    "model_families": self.model_families,
                 },
                 filepath,
             )
@@ -240,6 +259,7 @@ class TemplateClassifier:
             self.ood_ratio_threshold = data.get("ood_ratio_threshold", 0.80)
             self._ood_radius = data.get("ood_radius")
             self.is_built = data.get("is_built", True)
+            self.model_families = data.get("model_families", {})
             return True
         except FileNotFoundError:
             logger.debug(f"Templates file not found: {filepath}")

@@ -78,33 +78,30 @@ def fisher_ratios(training_data: dict) -> np.ndarray | None:
     return between / (within + 1e-10)
 
 
-def mean_pairwise_distance(training_data: dict) -> np.ndarray | None:
-    """Mean pairwise cosine distance per feature dimension.
+def pairwise_cosine_distances(training_data: dict) -> tuple[list[str], np.ndarray] | None:
+    """Compute pairwise cosine distances between family mean vectors.
 
-    Computed across all (family_i_mean, family_j_mean) pairs for each feature.
-    Higher = more separating power for that feature.
+    Returns:
+        (families, dist_matrix) where dist_matrix[i,j] is the cosine distance
+        between family i and family j (0 = identical, 1 = orthogonal, 2 = opposite).
+        Lower = more similar = harder to tell apart.
     """
     matrices = {f: np.array(v, dtype=np.float32)
                 for f, v in training_data.items() if v}
     if len(matrices) < 2:
         return None
 
-    means = np.stack([m.mean(axis=0) for m in matrices.values()])  # (K, D)
-    families = list(matrices.keys())
-    K = len(families)
-    if K < 2:
-        return None
+    families = sorted(matrices.keys())
+    means = np.stack([matrices[f].mean(axis=0) for f in families])  # (K, D)
 
-    n_features = means.shape[1]
-    dist_sum = np.zeros(n_features, dtype=np.float64)
-    n_pairs = 0
+    # Normalise rows
+    norms = np.linalg.norm(means, axis=1, keepdims=True) + 1e-9
+    normed = means / norms
 
-    for i in range(K):
-        for j in range(i + 1, K):
-            dist_sum += np.abs(means[i] - means[j])
-            n_pairs += 1
-
-    return dist_sum / n_pairs
+    # Cosine similarity → distance
+    sim = normed @ normed.T
+    dist = 1.0 - np.clip(sim, -1.0, 1.0)
+    return families, dist
 
 
 # ── Prompt-level aggregation ───────────────────────────────────────────────────
@@ -142,15 +139,15 @@ def run_live_analysis(args):
     elif backend == "openai":
         import os
         from llm_fingerprinter.openai_client import OpenAIClient
-        client = OpenAIClient(endpoint, api_key=os.environ.get("OPENAI_API_KEY", ""))
+        client = OpenAIClient(os.environ.get("OPENAI_API_KEY", ""), endpoint=endpoint)
     elif backend == "gemini":
         import os
         from llm_fingerprinter.gemini_client import GeminiClient
-        client = GeminiClient(endpoint, api_key=os.environ.get("GEMINI_API_KEY", ""))
+        client = GeminiClient(os.environ.get("GEMINI_API_KEY", ""), endpoint=endpoint)
     elif backend == "custom":
         import os
         from llm_fingerprinter.custom_client import CustomClient
-        client = CustomClient(endpoint, api_key=os.environ.get("OPENAI_API_KEY", ""))
+        client = CustomClient(api_key=os.environ.get("OPENAI_API_KEY", ""))
     else:
         print(f"Unsupported backend '{backend}'. Use: ollama / openai / gemini / custom")
         sys.exit(1)
@@ -260,17 +257,25 @@ def run_training_analysis(args):
     ling_dim  = config.LINGUISTIC_DIM
     behav_dim = config.BEHAVIORAL_DIM
 
-    print("\nDiscriminability by feature type within each layer:")
+    # Compute all values first so we can scale bars relative to the global max
+    layer_type_vals = []
     for i, layer in enumerate(config.LAYER_ORDER):
         start  = i * per_layer
         e_mean = float(scores[start:start + embed_dim].mean())
         l_mean = float(scores[start + embed_dim:start + embed_dim + ling_dim].mean())
         b_mean = float(scores[start + embed_dim + ling_dim:
                                 start + embed_dim + ling_dim + behav_dim].mean())
+        layer_type_vals.append((layer, e_mean, l_mean, b_mean))
+
+    global_max = max(v for _, e, l, b in layer_type_vals for v in (e, l, b))
+    type_scale = 40.0 / global_max if global_max > 0 else 1.0
+
+    print("\nDiscriminability by feature type within each layer:")
+    for layer, e_mean, l_mean, b_mean in layer_type_vals:
         print(f"\n  {layer}:")
-        _print_bar("    embedding",  e_mean, 10.0)
-        _print_bar("    linguistic", l_mean, 10.0)
-        _print_bar("    behavioral", b_mean, 10.0)
+        _print_bar("    embedding",  e_mean, type_scale)
+        _print_bar("    linguistic", l_mean, type_scale)
+        _print_bar("    behavioral", b_mean, type_scale)
 
     # ── Top discriminative linguistic / behavioral features ────────────────────
     LINGUISTIC_NAMES = [
@@ -305,6 +310,48 @@ def run_training_analysis(args):
     max_b = max(beh_agg.values()) if beh_agg else 1.0
     for name, val in sorted(beh_agg.items(), key=lambda x: -x[1]):
         _print_bar(f"  {name}", val, 20.0 / max_b)
+
+    # ── Pairwise family similarity matrix ─────────────────────────────────────
+    pair_result = pairwise_cosine_distances(training_data)
+    if pair_result:
+        fams, dist_matrix = pair_result
+        K = len(fams)
+
+        print(f"\n{'='*65}")
+        print("  Pairwise Family Similarity  (cosine distance between means)")
+        print("  Lower = more similar = harder to tell apart")
+        print(f"{'='*65}\n")
+
+        # Header row
+        col_w = 10
+        header = f"  {'':16}" + "".join(f"{f:>{col_w}}" for f in fams)
+        print(header)
+        print("  " + "─" * (16 + col_w * K))
+
+        for i, fi in enumerate(fams):
+            row = f"  {fi:<16}"
+            for j, fj in enumerate(fams):
+                if i == j:
+                    row += f"{'—':>{col_w}}"
+                else:
+                    d = dist_matrix[i, j]
+                    row += f"{d:>{col_w}.4f}"
+            print(row)
+
+        # Highlight the most and least separable pairs
+        pairs = [(dist_matrix[i, j], fams[i], fams[j])
+                 for i in range(K) for j in range(i + 1, K)]
+        pairs.sort()
+
+        print(f"\n  Hardest to distinguish (most similar):")
+        for d, fa, fb in pairs[:3]:
+            bar = "█" * max(1, int((1 - d) * 30))
+            print(f"    {fa} ↔ {fb:<16}  dist={d:.4f}  {bar}")
+
+        print(f"\n  Easiest to distinguish (most different):")
+        for d, fa, fb in reversed(pairs[-3:]):
+            bar = "█" * max(1, int(d * 30))
+            print(f"    {fa} ↔ {fb:<16}  dist={d:.4f}  {bar}")
 
     # ── Prompt listing by layer importance ────────────────────────────────────
     suite   = PromptSuite()

@@ -1,0 +1,12 @@
+python3 ./llm_fingerprinter//cli.py simulate -b ollama-cloud --model ministral-3:8b --family mistral --api-key c34359f402f04a7cb6cb5baa78701854.woBTRKnPEbtjOMb6fRksE7R2
+python3 ./llm_fingerprinter/cli.py simulate -b ollama-cloud --model gemma3:12b --family gemma --api-key c34359f402f04a7cb6cb5baa78701854.woBTRKnPEbtjOMb6fRksE7R2
+python3 ./llm_fingerprinter/cli.py simulate -b ollama-cloud --model gemma3:4b --family gemma --api-key c34359f402f04a7cb6cb5baa78701854.woBTRKnPEbtjOMb6fRksE7R2
+python3 ./llm_fingerprinter/cli.py simulate -b ollama-cloud --model ministral-3:3b --family mistral --api-key c34359f402f04a7cb6cb5baa78701854.woBTRKnPEbtjOMb6fRksE7R2
+python3 ./llm_fingerprinter/cli.py simulate -b ollama-cloud --model gemma3:27b --family gemma --api-key c34359f402f04a7cb6cb5baa78701854.woBTRKnPEbtjOMb6fRksE7R2
+python3 ./llm_fingerprinter/cli.py simulate -b openai --model o4-mini --family gpt --api-key  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
+python3 ./cli.py simulate -b openai --model gpt-4o-mini --family gpt --api-key  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
+python3 ./cli.py simulate -b openai --model o3 --family gpt --api-key  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
+python3 ./cli.py simulate -b openai --model gpt-4.1 --family gpt --api-key  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
+python3 ./cli.py simulate -b openai --model gpt-5 --family gpt --api-key  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
+python3 ./cli.py simulate -b openai --model gpt-5.1 --family gpt --api-key  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
+python3 ./cli.py simulate -b openai --model gpt-4.1-mini --family gpt --api-key  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

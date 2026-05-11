@@ -280,6 +280,33 @@ class FingerprintStore:
 
         return model_data
 
+    def export_model_family_map(self) -> dict:
+        """Return a mapping of model_name -> family for all fingerprints that
+        carry both fields in metadata.
+
+        Used by build-model-templates so that family labels collected during
+        'simulate --family <X>' are stored alongside model-level templates.
+        This lets identify() derive the correct family from a high-confidence
+        model-template match even when the ensemble classifier is uncertain.
+
+        Returns:
+            Dict mapping model_name (str) -> family (str).  Only the first
+            family label seen for each model_name is kept (they should all
+            agree — if not, the simulate call was inconsistent).
+        """
+        family_map: dict = {}
+        for filepath in self.list_fingerprints():
+            data = self.load_fingerprint(str(filepath))
+            if not data:
+                continue
+            meta = data.get('metadata') or {}
+            model_name = meta.get('model_name')
+            family = meta.get('family') or data.get('family')
+            if model_name and family and model_name not in family_map:
+                family_map[model_name] = family
+        logger.debug(f"Model→family map: {family_map}")
+        return family_map
+
     def export_for_training(self):
         training_data = {}
         

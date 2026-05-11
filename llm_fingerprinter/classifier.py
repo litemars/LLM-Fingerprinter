@@ -24,7 +24,7 @@ class EnsembleClassifier:
                  ood_confidence_threshold = 0.3,
                  ood_disagreement_threshold = 0.15):
 
-        self.model_families = model_families
+        self.model_families = model_families if model_families is not None else config.MODEL_FAMILIES
 
         self.families_inv = {v: k for k, v in self.model_families.items()}
         self.n_classes = len(self.model_families)
@@ -80,6 +80,73 @@ class EnsembleClassifier:
         mode = "with PCA" if use_pca else "without PCA"
         logger.info(f"Initialized EnsembleClassifier {mode}, {self.n_classes} classes, "
                     f"embedding rebalancing {embedding_pca_dim}d")
+
+    def _generate_early_stop_variants(self, X: np.ndarray, y: np.ndarray):
+        """Generate synthetic partial fingerprints that mirror early-stopped inference.
+
+        When early stopping fires after layer k, fingerprint_model fills the
+        remaining (n_layers - k) layer blocks with the mean of the k completed
+        blocks — see _build_partial_fingerprint.  Without training examples in
+        that format the classifier receives completely alien inputs whenever
+        early stopping is used.
+
+        For each full training fingerprint this method creates one synthetic
+        variant per possible early-stop point (after layer 1, after layer 2, …)
+        using the identical padding rule:
+
+            fallback = mean(completed layer blocks)
+            remaining blocks ← fallback
+
+        The variants carry the same family label as the original, so the
+        classifier learns "identify the family from whatever layers are real,
+        regardless of how many were completed."
+
+        Call order in train(): before _augment_samples so that noise
+        augmentation is applied uniformly to both full and partial fingerprints.
+
+        Args:
+            X: (n_samples, n_layers * per_layer_dim) full training fingerprints
+            y: (n_samples,) family labels
+
+        Returns:
+            X_out: original rows + all synthetic partial variants stacked
+            y_out: repeated labels (same length as X_out)
+        """
+        n_features = X.shape[1]
+        if n_features % self.n_layers != 0:
+            logger.warning(
+                f"_generate_early_stop_variants: {n_features} dims not divisible "
+                f"by n_layers={self.n_layers} — skipping partial-fingerprint augmentation"
+            )
+            return X, y
+
+        per_layer = n_features // self.n_layers
+        X_parts = [X]
+        y_parts = [y]
+
+        for stop_after in range(1, self.n_layers):   # 1-layer done, 2-layers done, …
+            # Completed blocks for this early-stop scenario
+            completed = [
+                X[:, i * per_layer:(i + 1) * per_layer]
+                for i in range(stop_after)
+            ]
+            # fallback: mean across the completed blocks, shape (n_samples, per_layer)
+            fallback = np.mean(completed, axis=0)
+
+            X_partial = X.copy()
+            for i in range(stop_after, self.n_layers):
+                X_partial[:, i * per_layer:(i + 1) * per_layer] = fallback
+
+            X_parts.append(X_partial)
+            y_parts.append(y)
+
+        X_out = np.vstack(X_parts)
+        y_out = np.concatenate(y_parts)
+        logger.info(
+            f"Early-stop variants: {len(X)} full → {len(X_out)} total "
+            f"({self.n_layers - 1} synthetic partial variant(s) per sample)"
+        )
+        return X_out, y_out
 
     def _augment_samples(self, X: np.ndarray, y: np.ndarray):
         """Augment training data with additive Gaussian noise scaled to each
@@ -207,10 +274,14 @@ class EnsembleClassifier:
         logger.info(f"PCA mode: {'enabled' if self.use_pca else 'disabled (raw features)'}")
 
         try:
-            # Augment data
-            X_train, y_train = self._augment_samples(X, y)
-            
-            # Preprocess (scale, optionally PCA)
+            # Step 1: add synthetic partial-fingerprint variants so the
+            # classifier handles early-stopped inference correctly.
+            X_exp, y_exp = self._generate_early_stop_variants(X, y)
+
+            # Step 2: noise augmentation on full + partial variants
+            X_train, y_train = self._augment_samples(X_exp, y_exp)
+
+            # Step 3: Preprocess (rebalance + scale, optionally PCA)
             X_processed = self._preprocess(X_train, fit=True)
             
             logger.info(f"Training features shape: {X_processed.shape}")
@@ -223,13 +294,11 @@ class EnsembleClassifier:
             self.svm.fit(X_processed, y_train)
             
             logger.info("Training MLP...")
-            # MLPClassifier has no class_weight param — pass balanced sample
-            # weights so it gets the same imbalance handling as RF and SVM.
-            classes, counts = np.unique(y_train, return_counts=True)
-            class_weight = len(y_train) / (len(classes) * counts)
-            sample_weight = np.array([class_weight[np.where(classes == c)[0][0]]
-                                      for c in y_train])
-            self.mlp.fit(X_processed, y_train, sample_weight=sample_weight)
+            # MLPClassifier does not support sample_weight or class_weight.
+            # Class imbalance is handled by RF (class_weight='balanced') and
+            # SVM (class_weight='balanced'), which carry more weight in the
+            # ensemble anyway (45% each vs 10% for MLP).
+            self.mlp.fit(X_processed, y_train)
 
             self.is_trained = True
             logger.info("Training complete")
@@ -254,14 +323,32 @@ class EnsembleClassifier:
             fp_processed = self._preprocess(fingerprint, fit=False)
             logger.debug(f"Processed fingerprint shape: {fp_processed.shape}")
 
-            # Get predictions from each classifier
-            rf_pred = self.rf.predict_proba(fp_processed)[0]
-            svm_pred = self.svm.predict_proba(fp_processed)[0]
-            mlp_pred = self.mlp.predict_proba(fp_processed)[0]
+            # Get predictions from each classifier and expand to the full
+            # n_classes probability space.
+            #
+            # CRITICAL: sklearn classifiers only emit columns for classes that
+            # appear in the training data.  If a family (e.g. 'gemini') has no
+            # training samples, its class index is absent from rf.classes_ and
+            # the output array is shorter than n_classes.  Naively using the
+            # raw array means every class index after the gap shifts by one —
+            # mistral's probability ends up labelled 'gemini', qwen's as
+            # 'mistral', etc.  We fix this by placing each classifier's output
+            # into the correct slot of a zero-initialised n_classes array.
+            n = self.n_classes
+            rf_pred  = np.zeros(n, dtype=np.float64)
+            svm_pred = np.zeros(n, dtype=np.float64)
+            mlp_pred = np.zeros(n, dtype=np.float64)
 
-            logger.debug(f"RF prediction: {rf_pred}")
-            logger.debug(f"SVM prediction: {svm_pred}")
-            logger.debug(f"MLP prediction: {mlp_pred}")
+            for col, class_id in enumerate(self.rf.classes_):
+                rf_pred[class_id]  = self.rf.predict_proba(fp_processed)[0][col]
+            for col, class_id in enumerate(self.svm.classes_):
+                svm_pred[class_id] = self.svm.predict_proba(fp_processed)[0][col]
+            for col, class_id in enumerate(self.mlp.classes_):
+                mlp_pred[class_id] = self.mlp.predict_proba(fp_processed)[0][col]
+
+            logger.debug(f"RF prediction (aligned):  {rf_pred}")
+            logger.debug(f"SVM prediction (aligned): {svm_pred}")
+            logger.debug(f"MLP prediction (aligned): {mlp_pred}")
 
             # Weighted ensemble
             weights = [0.45, 0.45, 0.10]  # RF, SVM, MLP
@@ -278,11 +365,12 @@ class EnsembleClassifier:
             top_family = self.families_inv[top_idx]
             top_confidence = ensemble_pred[top_idx]
 
-            # Build probability dict
-            probs = {}
-            for i in range(len(ensemble_pred)):
-                if i in self.families_inv:
-                    probs[self.families_inv[i]] = float(ensemble_pred[i])
+            # Build probability dict (only families with training data or > 0)
+            probs = {
+                self.families_inv[i]: float(ensemble_pred[i])
+                for i in range(n)
+                if i in self.families_inv
+            }
 
             # OOD detection: check confidence and classifier agreement
             top_per_classifier = [np.argmax(rf_pred), np.argmax(svm_pred), np.argmax(mlp_pred)]
@@ -298,9 +386,9 @@ class EnsembleClassifier:
                 'agreement_ratio': agreement_ratio,
                 'confidence_std': confidence_std,
                 'classifier_top_classes': {
-                    'rf': self.families_inv.get(top_per_classifier[0], '?'),
-                    'svm': self.families_inv.get(top_per_classifier[1], '?'),
-                    'mlp': self.families_inv.get(top_per_classifier[2], '?'),
+                    'rf':  self.families_inv.get(int(top_per_classifier[0]), '?'),
+                    'svm': self.families_inv.get(int(top_per_classifier[1]), '?'),
+                    'mlp': self.families_inv.get(int(top_per_classifier[2]), '?'),
                 },
             }
 
@@ -429,6 +517,20 @@ class EnsembleClassifier:
 
         X = np.array(X_list, dtype=np.float32)
         y = np.array(y_list)
+
+        # Warn about families that are defined in MODEL_FAMILIES but have no
+        # training data.  The underlying sklearn classifiers will silently skip
+        # their class index, shifting all subsequent indices by one and causing
+        # completely wrong label mappings at inference time.  The fix in
+        # predict_with_confidence handles this correctly, but surfacing it here
+        # makes the data gap explicit.
+        missing = [f for f in self.model_families if f not in family_counts]
+        if missing:
+            logger.warning(
+                f"No training data for: {missing}. "
+                f"These families will score 0% at inference — "
+                f"run 'simulate --family <name>' to add them."
+            )
 
         logger.info(f"Training from simulations: {family_counts}")
         return self.train(X, y)

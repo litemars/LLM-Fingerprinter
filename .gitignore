@@ -17,6 +17,8 @@ ollama-api-key
 claude-api-key
 google-api-key
 openai-api-key
+llm_fingerprinter/nltk_data/
+benchmark_models.json
 *.egg-info/
 *.egg
 dist/
@@ -30,7 +32,6 @@ htmlcov/
 *.swp
 *.swo
 *~
-
 # PyPI packaging
 *.tar.gz
 *.whl

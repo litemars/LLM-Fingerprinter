@@ -60,23 +60,42 @@ BEHAVIORAL_NAMES = [
 ]
 
 
-def feature_name(idx: int) -> str:
+def _get_layout(n_features: int) -> tuple[int, int, int]:
+    """Return (per_layer, embed_dim, ling_dim) for either raw or PCA-rebalanced space.
+
+    Raw (1206):        3 × (384 embed + 12 ling + 6 beh)
+    Rebalanced (246):  3 × (64 PCA-embed + 12 ling + 6 beh)
+    Any other size:    infer embed_dim from per_layer - 18
+    """
+    n_layers  = config.NUM_PROMPT_LAYERS       # 3
+    ling_dim  = config.LINGUISTIC_DIM          # 12
+    behav_dim = config.BEHAVIORAL_DIM          #  6
+    non_embed = ling_dim + behav_dim           # 18
+
+    if n_features == config.RAW_FINGERPRINT_DIM:
+        # Raw un-compressed features
+        return config.PER_PROMPT_FEATURE_DIM, config.EMBEDDING_DIM, ling_dim
+
+    # PCA-rebalanced (or any other compressed form)
+    per_layer = n_features // n_layers
+    embed_dim = per_layer - non_embed
+    return per_layer, embed_dim, ling_dim
+
+
+def feature_name(idx: int, n_features: int) -> str:
     """Return a human-readable name for feature dimension idx (0-based)."""
-    per_layer = config.PER_PROMPT_FEATURE_DIM  # 402
-    embed_dim = config.EMBEDDING_DIM            # 384
-    ling_dim  = config.LINGUISTIC_DIM           # 12
-    behav_dim = config.BEHAVIORAL_DIM           #  6
+    per_layer, embed_dim, ling_dim = _get_layout(n_features)
+    behav_dim = config.BEHAVIORAL_DIM
 
     layer_idx = idx // per_layer
     slot      = idx %  per_layer
 
-    if layer_idx < len(config.LAYER_ORDER):
-        layer = config.LAYER_ORDER[layer_idx]
-    else:
-        layer = f"layer{layer_idx}"
+    layer = (config.LAYER_ORDER[layer_idx]
+             if layer_idx < len(config.LAYER_ORDER)
+             else f"layer{layer_idx}")
 
     if slot < embed_dim:
-        return f"{layer}/embedding[{slot}]"
+        return f"{layer}/embedding_pca[{slot}]" if n_features != config.RAW_FINGERPRINT_DIM else f"{layer}/embedding[{slot}]"
     slot -= embed_dim
     if slot < ling_dim:
         return f"{layer}/linguistic/{LINGUISTIC_NAMES[slot]}"
@@ -86,10 +105,8 @@ def feature_name(idx: int) -> str:
     return f"{layer}/unknown[{slot}]"
 
 
-def feature_type(idx: int) -> str:
-    per_layer = config.PER_PROMPT_FEATURE_DIM
-    embed_dim = config.EMBEDDING_DIM
-    ling_dim  = config.LINGUISTIC_DIM
+def feature_type(idx: int, n_features: int) -> str:
+    per_layer, embed_dim, ling_dim = _get_layout(n_features)
     slot = idx % per_layer
     if slot < embed_dim:
         return "embedding"
@@ -98,8 +115,8 @@ def feature_type(idx: int) -> str:
     return "behavioral"
 
 
-def feature_layer(idx: int) -> str:
-    per_layer = config.PER_PROMPT_FEATURE_DIM
+def feature_layer(idx: int, n_features: int) -> str:
+    per_layer, _, _ = _get_layout(n_features)
     layer_idx = idx // per_layer
     if layer_idx < len(config.LAYER_ORDER):
         return config.LAYER_ORDER[layer_idx]
@@ -200,30 +217,27 @@ def main():
         sys.exit(1)
 
     importances = clf.rf.feature_importances_
-    n_features = len(importances)
+    n_features  = len(importances)
+    per_layer, embed_dim, ling_dim = _get_layout(n_features)
+    behav_dim   = config.BEHAVIORAL_DIM
+    space_label = "raw" if n_features == config.RAW_FINGERPRINT_DIM else f"PCA-rebalanced"
 
     print(f"\n{'='*65}")
-    print(f"  RF Feature Importance Analysis  —  {n_features} total dimensions")
+    print(f"  RF Feature Importance Analysis  —  {n_features} dims ({space_label})")
     print(f"{'='*65}")
 
     # ── Per-layer aggregate ────────────────────────────────────────────────────
-    per_layer = config.PER_PROMPT_FEATURE_DIM
     print("\nImportance by prompt layer (higher = layer's prompts matter more):")
     for i, layer in enumerate(config.LAYER_ORDER):
         start = i * per_layer
-        end   = start + per_layer
-        val   = importances[start:end].sum()
+        val   = importances[start:start + per_layer].sum()
         bar   = "█" * max(1, int(val * 300))
         print(f"  {layer:<16}  {val:.4f}  {bar}")
 
     # ── Per-type aggregate ─────────────────────────────────────────────────────
-    embed_dim = config.EMBEDDING_DIM
-    ling_dim  = config.LINGUISTIC_DIM
-    behav_dim = config.BEHAVIORAL_DIM
-
     totals = {"embedding": 0.0, "linguistic": 0.0, "behavioral": 0.0}
     for i, imp in enumerate(importances):
-        totals[feature_type(i)] += imp
+        totals[feature_type(i, n_features)] += imp
 
     print("\nImportance by feature type:")
     for label, val in totals.items():
@@ -231,7 +245,7 @@ def main():
         print(f"  {label:<16}  {val:.4f}  {bar}")
 
     # ── Named linguistic / behavioral breakdown ────────────────────────────────
-    print("\nNamed linguistic features (averaged across layers):")
+    print("\nNamed linguistic features (summed across layers):")
     ling_by_name: dict[str, float] = {}
     for i, imp in enumerate(importances):
         slot = i % per_layer
@@ -239,30 +253,36 @@ def main():
             name = LINGUISTIC_NAMES[slot - embed_dim]
             ling_by_name[name] = ling_by_name.get(name, 0.0) + imp
 
-    for name, val in sorted(ling_by_name.items(), key=lambda x: -x[1]):
-        bar = "█" * max(1, int(val * 3000))
-        print(f"  {name:<32}  {val:.6f}  {bar}")
+    if ling_by_name:
+        for name, val in sorted(ling_by_name.items(), key=lambda x: -x[1]):
+            bar = "█" * max(1, int(val * 3000))
+            print(f"  {name:<32}  {val:.6f}  {bar}")
+    else:
+        print("  (none — all importance in embedding dims)")
 
-    print("\nNamed behavioral features (averaged across layers):")
+    print("\nNamed behavioral features (summed across layers):")
     beh_by_name: dict[str, float] = {}
     for i, imp in enumerate(importances):
         slot = i % per_layer
-        if slot >= embed_dim + ling_dim:
+        if embed_dim + ling_dim <= slot < embed_dim + ling_dim + behav_dim:
             name = BEHAVIORAL_NAMES[slot - embed_dim - ling_dim]
             beh_by_name[name] = beh_by_name.get(name, 0.0) + imp
 
-    for name, val in sorted(beh_by_name.items(), key=lambda x: -x[1]):
-        bar = "█" * max(1, int(val * 3000))
-        print(f"  {name:<32}  {val:.6f}  {bar}")
+    if beh_by_name:
+        for name, val in sorted(beh_by_name.items(), key=lambda x: -x[1]):
+            bar = "█" * max(1, int(val * 3000))
+            print(f"  {name:<32}  {val:.6f}  {bar}")
+    else:
+        print("  (none — all importance in embedding dims)")
 
     # ── Top individual features ────────────────────────────────────────────────
-    indices = np.argsort(importances)[::-1]
+    indices = list(np.argsort(importances)[::-1])
 
     if args.layer or args.feat_type:
         indices = [
             idx for idx in indices
-            if (not args.layer    or feature_layer(idx) == args.layer)
-            and (not args.feat_type or feature_type(idx) == args.feat_type)
+            if (not args.layer     or feature_layer(idx, n_features) == args.layer)
+            and (not args.feat_type or feature_type(idx, n_features) == args.feat_type)
         ]
 
     top_n = min(args.top, len(indices))
@@ -273,8 +293,7 @@ def main():
     for rank, idx in enumerate(indices[:top_n], 1):
         imp = importances[idx]
         cumulative += imp
-        name = feature_name(idx)
-        print(f"  {rank:<5}  {imp:>10.6f}  {name}")
+        print(f"  {rank:<5}  {imp:>10.6f}  {feature_name(idx, n_features)}")
 
     coverage = cumulative / importances.sum() if importances.sum() > 0 else 0
     print(f"\n  Top {top_n} features cover {coverage:.1%} of total RF importance.\n")
@@ -291,17 +310,19 @@ def main():
                   "(need >= 2 families with fingerprints).\n")
         else:
             fisher, families = result
+            f_features = len(fisher)
             print(f"  Families: {', '.join(families)}\n")
+            f_per_layer, _, _ = _get_layout(f_features)
             print("  Fisher ratio by prompt layer (higher = more separable):")
             for i, layer in enumerate(config.LAYER_ORDER):
-                start = i * per_layer
-                val   = fisher[start:start + per_layer].mean()
+                start = i * f_per_layer
+                val   = fisher[start:start + f_per_layer].mean()
                 print(f"    {layer:<16}  {val:.4f}")
 
             print("\n  Top 20 most discriminative dimensions (Fisher ratio):")
             f_indices = np.argsort(fisher)[::-1][:20]
             for rank, idx in enumerate(f_indices, 1):
-                print(f"    {rank:>2}.  {fisher[idx]:>8.3f}  {feature_name(idx)}")
+                print(f"    {rank:>2}.  {fisher[idx]:>8.3f}  {feature_name(idx, f_features)}")
             print()
 
 

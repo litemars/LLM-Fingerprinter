@@ -120,7 +120,17 @@ def print_report(result: dict):
     model_est  = result.get('model_estimate')
 
     # ── Family ────────────────────────────────────────────────────────────────
-    if is_ood:
+    family_source = result.get('family_source')
+    if is_ood and family_source == 'model_template':
+        # Family was recovered from a high-confidence model-template match —
+        # show it prominently instead of the confusing OOD ensemble output.
+        mt_conf = result.get('model_estimate', {}).get('confidence', 0.0)
+        click.echo(f"\n  Family:     {click.style(family.upper(), fg='green', bold=True)}"
+                   f"  ({mt_conf*100:.1f}% via model template)")
+        click.echo(click.style(
+            "  ⚠️  Note: ensemble was uncertain — family inferred from model match",
+            fg='yellow'))
+    elif is_ood:
         click.echo(click.style(f"\n  ⚠️  OUT-OF-DISTRIBUTION DETECTED", fg='yellow', bold=True))
         predicted = result.get('predicted_family', '?')
         click.echo(f"  Best guess: {click.style(predicted.upper(), fg='yellow')}")
@@ -240,11 +250,11 @@ def cli(ctx, verbose):
 @backend_options
 @click.option('--model', '-m', default=None, help='Model name')
 @click.option('--repeats', default=1, type=int, help='Prompt repeats (default: 1)')
-@click.option('--early-stop', default=0.95, type=float, show_default=True,
+@click.option('--early-stop', default=0.0, type=float, show_default=True,
               metavar='THRESHOLD',
               help='Stop after a layer if confidence exceeds THRESHOLD. '
                    'Skips remaining layers and saves API calls. '
-                   'Use 0 to disable and always run the full suite.')
+                   'Default 0 = disabled (always run full suite).')
 @click.pass_context
 def identify(ctx, backend, endpoint, api_key, request_file, model, repeats, early_stop):
     """Identify model family using trained classifier.
@@ -315,13 +325,32 @@ def identify(ctx, backend, endpoint, api_key, request_file, model, repeats, earl
                 try:
                     mt_res = mtc.classify(fp_vec, top_k=4)
                     result['model_estimate'] = {
-                        'predicted_model': mt_res['predicted_family'],
-                        'confidence':      mt_res['confidence'],
-                        'distance':        mt_res['distance'],
-                        'is_ood':          mt_res['is_ood'],
-                        'ranked':          mt_res['ranked'],
+                        'predicted_model':  mt_res['predicted_family'],
+                        'confidence':       mt_res['confidence'],
+                        'distance':         mt_res['distance'],
+                        'is_ood':           mt_res['is_ood'],
+                        'ranked':           mt_res['ranked'],
+                        'inferred_family':  mt_res.get('inferred_family'),
                     }
                     click.echo(f"🔬 Model templates: {len(mtc.templates)} models loaded")
+
+                    # ── Family recovery from model template ───────────────
+                    # When the ensemble is OOD (uncertain) but the model-
+                    # template match is clear and high-confidence, trust the
+                    # family label that was stored at build-model-templates
+                    # time rather than the ensemble's confused best guess.
+                    me = result['model_estimate']
+                    if (result.get('ood_detected')
+                            and not me['is_ood']
+                            and me['confidence'] >= 0.8
+                            and me.get('inferred_family')):
+                        result['family'] = me['inferred_family']
+                        result['family_source'] = 'model_template'
+                        logger.info(
+                            f"Family recovered from model template: "
+                            f"{me['inferred_family']} "
+                            f"(confidence={me['confidence']:.3f})"
+                        )
                 except Exception as _mt_err:
                     logger.debug(f"Model template classify failed: {_mt_err}")
 
@@ -916,12 +945,15 @@ def build_model_templates(ctx, ood_ratio, min_samples):
 
     try:
         model_data = {}
+        model_family_map = {}
         for search_dir in [config.TRAINING_DIR, config.FINGERPRINTS_DIR]:
             store = FingerprintStore(str(search_dir))
             click.echo(f"📂 Loading from {search_dir.name}/…")
             data = store.export_by_model()
             for model_name, vectors in data.items():
                 model_data.setdefault(model_name, []).extend(vectors)
+            fmap = store.export_model_family_map()
+            model_family_map.update(fmap)
 
         if not model_data:
             click.echo(click.style("❌ No fingerprints found", fg='red'))
@@ -937,15 +969,20 @@ def build_model_templates(ctx, ood_ratio, min_samples):
 
         click.echo("\n📊 Model data:")
         for m, vecs in sorted(model_data.items()):
-            click.echo(f"   {m:30s}  {len(vecs)} sample(s)")
+            fam = model_family_map.get(m, '?')
+            click.echo(f"   {m:30s}  {len(vecs)} sample(s)  [{fam}]")
 
         if not model_data:
             click.echo(click.style("❌ No models meet the minimum sample threshold", fg='red'))
             sys.exit(1)
 
+        if model_family_map:
+            click.echo(f"\n   Family labels resolved for "
+                       f"{len(model_family_map)}/{len(model_data)} models")
+
         click.echo(f"\n🔬 Building model-level templates ({len(model_data)} models)…")
         mtc = TemplateClassifier(ood_ratio_threshold=ood_ratio)
-        if not mtc.build(model_data):
+        if not mtc.build(model_data, model_families=model_family_map):
             click.echo(click.style("❌ Failed to build model templates", fg='red'))
             sys.exit(1)
 
