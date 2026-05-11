@@ -5,6 +5,8 @@ from datetime import datetime
 from typing import Dict
 import numpy as np
 
+from llm_fingerprinter import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -175,35 +177,135 @@ class FingerprintStore:
 
         vector = data.get("vector")
         raw_features = data.get("raw_features", {})
-        
+
+        # Use stored vector directly if available
         if vector is not None and len(vector) >= 400:
             return vector
-        
+
+        # Try per-layer reconstruction (new format)
+        layer_order = config.LAYER_ORDER
+        if any(layer in raw_features for layer in layer_order):
+            layer_vectors = []
+            for layer_name in layer_order:
+                layer_data = raw_features.get(layer_name, {})
+                embeddings = layer_data.get("embeddings")
+                linguistic = layer_data.get("linguistic")
+                behavioral = layer_data.get("behavioral")
+
+                if embeddings is None:
+                    logger.warning(f"No embeddings for layer '{layer_name}'")
+                    return None
+
+                parts = []
+                for arr in [embeddings, linguistic, behavioral]:
+                    if arr is not None:
+                        if not isinstance(arr, np.ndarray):
+                            arr = np.array(arr, dtype=np.float32)
+                        parts.append(arr)
+
+                layer_vectors.append(np.concatenate(parts))
+
+            full_vector = np.concatenate(layer_vectors)
+            logger.debug(f"Reconstructed per-layer vector: {len(full_vector)} dims")
+            return full_vector
+
+        # Fallback: old flat format
         embeddings = raw_features.get("embeddings")
         linguistic = raw_features.get("linguistic")
         behavioral = raw_features.get("behavioral")
-        
+
         if embeddings is None:
             logger.warning("No embeddings found in raw_features")
             return None
-        
+
         if not isinstance(embeddings, np.ndarray):
             embeddings = np.array(embeddings, dtype=np.float32)
-        
+
         if linguistic is None or behavioral is None:
             logger.debug(f"Only embeddings available: {len(embeddings)} dims")
             return embeddings
-        
+
         if not isinstance(linguistic, np.ndarray):
             linguistic = np.array(linguistic, dtype=np.float32)
         if not isinstance(behavioral, np.ndarray):
             behavioral = np.array(behavioral, dtype=np.float32)
-        
+
         full_vector = np.concatenate([embeddings, linguistic, behavioral])
         logger.debug(f"Reconstructed full vector: {len(full_vector)} dims "
                     f"({len(embeddings)} + {len(linguistic)} + {len(behavioral)})")
-        
+
         return full_vector
+
+    def export_by_model(self):
+        """Export fingerprints grouped by exact model name.
+
+        Reads the 'model_name' field from metadata (set by the simulate command).
+        Falls back to the top-level 'model' field for older fingerprints.
+
+        Returns:
+            Dict mapping model_name -> list of vectors (same format as
+            export_for_training but keyed by specific model instead of family).
+        """
+        model_data = {}
+
+        for filepath in self.list_fingerprints():
+            data = self.load_fingerprint(str(filepath))
+            if not data:
+                continue
+
+            # Prefer the clean model_name stored in metadata (new format).
+            # Older fingerprints only have a save_name in the top-level 'model'
+            # field (e.g. "llama3_2_llama_sim0_t50") — not a usable model name,
+            # so we skip them rather than pollute the template store.
+            model_name = (data.get('metadata') or {}).get('model_name')
+            if not model_name:
+                logger.debug(
+                    f"Skipping {filepath}: no 'model_name' in metadata "
+                    f"(pre-dates model-level tracking). Re-run 'simulate' to include."
+                )
+                continue
+
+            vector = self._get_full_vector(data)
+            if vector is None:
+                logger.warning(f"Skipping {filepath}: could not get full vector")
+                continue
+
+            if model_name not in model_data:
+                model_data[model_name] = []
+            model_data[model_name].append(vector)
+
+        for model_name, vectors in model_data.items():
+            logger.info(f"Exported model '{model_name}': {len(vectors)} samples, "
+                        f"{len(vectors[0])} dims each")
+
+        return model_data
+
+    def export_model_family_map(self) -> dict:
+        """Return a mapping of model_name -> family for all fingerprints that
+        carry both fields in metadata.
+
+        Used by build-model-templates so that family labels collected during
+        'simulate --family <X>' are stored alongside model-level templates.
+        This lets identify() derive the correct family from a high-confidence
+        model-template match even when the ensemble classifier is uncertain.
+
+        Returns:
+            Dict mapping model_name (str) -> family (str).  Only the first
+            family label seen for each model_name is kept (they should all
+            agree — if not, the simulate call was inconsistent).
+        """
+        family_map: dict = {}
+        for filepath in self.list_fingerprints():
+            data = self.load_fingerprint(str(filepath))
+            if not data:
+                continue
+            meta = data.get('metadata') or {}
+            model_name = meta.get('model_name')
+            family = meta.get('family') or data.get('family')
+            if model_name and family and model_name not in family_map:
+                family_map[model_name] = family
+        logger.debug(f"Model→family map: {family_map}")
+        return family_map
 
     def export_for_training(self):
         training_data = {}

@@ -2,6 +2,7 @@ llm-fingerprinting
 fingerprinting
 fingerprints/
 logs
+tests
 .DS_Store
 __pycache__
 *.pyc
@@ -16,6 +17,8 @@ ollama-api-key
 claude-api-key
 google-api-key
 openai-api-key
+llm_fingerprinter/nltk_data/
+benchmark_models.json
 *.egg-info/
 *.egg
 dist/
@@ -28,8 +31,13 @@ htmlcov/
 .tox/
 *.swp
 *.swo
+TODO
+benchmark_results.json
+benchmark.py
+analyze_features.py
+analyze_results.py
+produce*
 *~
-
 # PyPI packaging
 *.tar.gz
 *.whl

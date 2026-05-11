@@ -4,7 +4,7 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A black-box fingerprinting system that identifies the underlying LLM model family (GPT, LLaMA, Mistral, etc.) by analyzing response patterns across 75 discriminative prompts. The system can identify fine-tuned models as well, tracing them back to their foundational base model.
+A black-box fingerprinting system that identifies the underlying LLM model family (GPT, LLaMA, Mistral, etc.) by analyzing response patterns across 31 discriminative prompts. The system can identify fine-tuned models as well, tracing them back to their foundational base model.
 
 **Note: Check config.py to see all identifiable model families**
 
@@ -260,7 +260,7 @@ llm-fingerprinter simulate [OPTIONS]
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
 | `--model` | `-m` | - | Model name (optional) |
-| `--family` | `-f` | - | **Required.** Model family: `gpt`, `claude`, `llama`, `gemini`, `mistral`, `qwen`, `gemma`, `deepseek` |
+| `--family` | `-f` | - | **Required.** Model family: `gpt`, `claude`, `llama`, `gemini`, `mistral`, `qwen`, `deepseek` |
 | `--num-sims` | `-n` | 3 | Number of fingerprints to generate |
 | `--repeats` | - | 2 | Prompts repeats per simulation |
 | `--backend` | `-b` | `ollama` | LLM backend |
@@ -499,7 +499,7 @@ llm-fingerprinter info
   gemini:       https://generativelanguage.googleapis.com
   custom:       Via request template file (-r)
 
-📋 Families: claude, deepseek, gemini, gemma, gpt, llama, mistral, qwen
+📋 Families: claude, deepseek, gemini, gpt, llama, mistral, qwen
 
 📊 Status:
   Fingerprints: 45
@@ -640,7 +640,7 @@ llm-fingerprinter train --cross-validate --cv-folds 10
 
 ## Data Storage
 
-When installed via pip, runtime data (fingerprints, trained models, logs) is stored in `~/.llm-fingerprinter/`. You can override this with the `LLM_FINGERPRINTER_DATA` environment variable. When running from a git checkout, data is stored in the project directory (backward compatible).
+When installed via pip, runtime data (fingerprints, trained models, logs) is stored in `fingerprinter/`. You can override this with the `LLM_FINGERPRINTER_DATA` environment variable. When running from a git checkout, data is stored in the project directory (backward compatible).
 
 ## 🔧 Custom Backend Deep Dive
 

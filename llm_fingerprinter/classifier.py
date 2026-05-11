@@ -1,6 +1,7 @@
 import numpy as np
 import logging
 from sklearn.ensemble import RandomForestClassifier
+from llm_fingerprinter import config
 from sklearn.svm import SVC
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler
@@ -17,19 +18,34 @@ class EnsembleClassifier:
                  pca_components = 64,
                  augment_data = True,
                  augment_noise_std = 0.01,
-                 augment_samples = 5):
-        
-        self.model_families = model_families
+                 augment_samples = 5,
+                 embedding_pca_dim = 64,
+                 n_layers = 3,
+                 ood_confidence_threshold = 0.3,
+                 ood_disagreement_threshold = 0.15):
+
+        self.model_families = model_families if model_families is not None else config.MODEL_FAMILIES
 
         self.families_inv = {v: k for k, v in self.model_families.items()}
         self.n_classes = len(self.model_families)
-        
+
         # PCA settings
         self.use_pca = use_pca
         self.pca_target_components = pca_components
         self.pca_components = None
         self.pca = None
-        
+
+        # Embedding rebalancing settings
+        self.embedding_pca_dim = embedding_pca_dim
+        self.n_layers = n_layers
+        self.embedding_pcas = None
+        self.per_layer_block_size = None
+        self.per_layer_embed_dim = None
+
+        # OOD detection settings
+        self.ood_confidence_threshold = ood_confidence_threshold
+        self.ood_disagreement_threshold = ood_disagreement_threshold
+
         # Augmentation settings
         self.augment_data = augment_data
         self.augment_noise_std = augment_noise_std
@@ -37,21 +53,21 @@ class EnsembleClassifier:
 
         # Classifiers
         self.rf = RandomForestClassifier(
-            n_estimators=100, 
-            random_state=42, 
+            n_estimators=100,
+            random_state=42,
             n_jobs=-1,
             class_weight='balanced'
         )
         self.svm = SVC(
-            kernel='rbf', 
-            C=1.0, 
-            probability=True, 
+            kernel='rbf',
+            C=1.0,
+            probability=True,
             random_state=42,
             class_weight='balanced'
         )
         self.mlp = MLPClassifier(
-            hidden_layer_sizes=(128, 64), 
-            max_iter=1000, 
+            hidden_layer_sizes=(128, 64),
+            max_iter=1000,
             random_state=42,
             early_stopping=True,
             validation_fraction=0.1
@@ -59,57 +75,191 @@ class EnsembleClassifier:
 
         self.scaler = StandardScaler()
         self.is_trained = False
-        self.input_dim = None 
+        self.input_dim = None
 
         mode = "with PCA" if use_pca else "without PCA"
-        logger.info(f"Initialized EnsembleClassifier {mode}, {self.n_classes} classes")
+        logger.info(f"Initialized EnsembleClassifier {mode}, {self.n_classes} classes, "
+                    f"embedding rebalancing {embedding_pca_dim}d")
+
+    def _generate_early_stop_variants(self, X: np.ndarray, y: np.ndarray):
+        """Generate synthetic partial fingerprints that mirror early-stopped inference.
+
+        When early stopping fires after layer k, fingerprint_model fills the
+        remaining (n_layers - k) layer blocks with the mean of the k completed
+        blocks — see _build_partial_fingerprint.  Without training examples in
+        that format the classifier receives completely alien inputs whenever
+        early stopping is used.
+
+        For each full training fingerprint this method creates one synthetic
+        variant per possible early-stop point (after layer 1, after layer 2, …)
+        using the identical padding rule:
+
+            fallback = mean(completed layer blocks)
+            remaining blocks ← fallback
+
+        The variants carry the same family label as the original, so the
+        classifier learns "identify the family from whatever layers are real,
+        regardless of how many were completed."
+
+        Call order in train(): before _augment_samples so that noise
+        augmentation is applied uniformly to both full and partial fingerprints.
+
+        Args:
+            X: (n_samples, n_layers * per_layer_dim) full training fingerprints
+            y: (n_samples,) family labels
+
+        Returns:
+            X_out: original rows + all synthetic partial variants stacked
+            y_out: repeated labels (same length as X_out)
+        """
+        n_features = X.shape[1]
+        if n_features % self.n_layers != 0:
+            logger.warning(
+                f"_generate_early_stop_variants: {n_features} dims not divisible "
+                f"by n_layers={self.n_layers} — skipping partial-fingerprint augmentation"
+            )
+            return X, y
+
+        per_layer = n_features // self.n_layers
+        X_parts = [X]
+        y_parts = [y]
+
+        for stop_after in range(1, self.n_layers):   # 1-layer done, 2-layers done, …
+            # Completed blocks for this early-stop scenario
+            completed = [
+                X[:, i * per_layer:(i + 1) * per_layer]
+                for i in range(stop_after)
+            ]
+            # fallback: mean across the completed blocks, shape (n_samples, per_layer)
+            fallback = np.mean(completed, axis=0)
+
+            X_partial = X.copy()
+            for i in range(stop_after, self.n_layers):
+                X_partial[:, i * per_layer:(i + 1) * per_layer] = fallback
+
+            X_parts.append(X_partial)
+            y_parts.append(y)
+
+        X_out = np.vstack(X_parts)
+        y_out = np.concatenate(y_parts)
+        logger.info(
+            f"Early-stop variants: {len(X)} full → {len(X_out)} total "
+            f"({self.n_layers - 1} synthetic partial variant(s) per sample)"
+        )
+        return X_out, y_out
 
     def _augment_samples(self, X: np.ndarray, y: np.ndarray):
-        """Augment training data by adding Gaussian noise."""
+        """Augment training data with additive Gaussian noise scaled to each
+        feature's standard deviation, clipped to the observed per-feature range.
+
+        Using std-scaled additive noise (not multiplicative) ensures that
+        near-zero features (e.g. refusal_score for non-refusing models) are
+        still perturbed — multiplicative noise would leave them unchanged.
+        """
         if not self.augment_data or len(X) == 0:
             return X, y
-            
+
+        X_min  = X.min(axis=0)
+        X_max  = X.max(axis=0)
+        X_std  = X.std(axis=0)          # per-feature spread of real training data
+        # Fall back to a small absolute value where std is zero (constant feature)
+        X_std  = np.where(X_std > 0, X_std, 1e-6)
+
         X_aug_list = [X]
         y_aug_list = [y]
-        
+
         for _ in range(self.augment_samples):
-            noise = np.random.normal(0, self.augment_noise_std, X.shape)
-            X_noisy = X + noise * np.abs(X)
+            noise    = np.random.normal(0, self.augment_noise_std, X.shape)
+            X_noisy  = X + noise * X_std
+            # Clip to observed range to prevent impossible values
+            X_noisy  = np.clip(X_noisy, X_min, X_max)
             X_aug_list.append(X_noisy)
             y_aug_list.append(y)
-        
+
         X_aug = np.vstack(X_aug_list)
         y_aug = np.concatenate(y_aug_list)
-        
-        logger.info(f"Augmented {len(X)} -> {len(X_aug)} samples")
+
+        logger.info(f"Augmented {len(X)} → {len(X_aug)} samples")
         return X_aug, y_aug
+
+    def _rebalance_features(self, X: np.ndarray, fit: bool = False):
+        """Compress embedding dimensions per layer block to rebalance feature groups.
+
+        Input: (n_samples, n_layers * per_layer_dim) e.g. (N, 1206)
+        Output: (n_samples, n_layers * (embedding_pca_dim + non_embed_dim)) e.g. (N, 246)
+        """
+        n_features = X.shape[1]
+        assert n_features % self.n_layers == 0, \
+            f"Feature dim {n_features} not divisible by n_layers {self.n_layers}"
+        per_layer_dim = n_features // self.n_layers
+        non_embed_dim = config.LINGUISTIC_DIM + config.BEHAVIORAL_DIM  # 18
+        embed_dim = per_layer_dim - non_embed_dim
+
+        if fit:
+            self.per_layer_block_size = per_layer_dim
+            self.per_layer_embed_dim = embed_dim
+            actual_components = min(self.embedding_pca_dim, X.shape[0], embed_dim)
+            if actual_components < self.embedding_pca_dim:
+                logger.warning(f"Reducing embedding PCA: {self.embedding_pca_dim} -> {actual_components}")
+            self.embedding_pcas = [
+                PCA(n_components=actual_components) for _ in range(self.n_layers)
+            ]
+
+        if self.embedding_pcas is None:
+            return X
+
+        rebalanced_blocks = []
+        for layer_idx in range(self.n_layers):
+            start = layer_idx * per_layer_dim
+            embeddings = X[:, start:start + embed_dim]
+            non_embeddings = X[:, start + embed_dim:start + per_layer_dim]
+
+            if fit:
+                compressed = self.embedding_pcas[layer_idx].fit_transform(embeddings)
+                variance = self.embedding_pcas[layer_idx].explained_variance_ratio_.sum()
+                logger.info(f"Layer {layer_idx} embedding PCA: {compressed.shape[1]} components, "
+                           f"{variance:.1%} variance retained")
+            else:
+                compressed = self.embedding_pcas[layer_idx].transform(embeddings)
+
+            rebalanced_blocks.append(np.hstack([compressed, non_embeddings]))
+
+        return np.hstack(rebalanced_blocks)
 
     def _preprocess(self, X: np.ndarray, fit = False):
         if fit:
-            X_scaled = self.scaler.fit_transform(X)
             self.input_dim = X.shape[1]
-            
+
+            # Step 1: Rebalance features (compress embeddings per layer)
+            X_rebalanced = self._rebalance_features(X, fit=True)
+            logger.info(f"Rebalanced: {X.shape[1]} -> {X_rebalanced.shape[1]} dimensions")
+
+            # Step 2: Scale
+            X_scaled = self.scaler.fit_transform(X_rebalanced)
+
+            # Step 3: Optional global PCA
             if self.use_pca:
                 max_components = min(X_scaled.shape[0], X_scaled.shape[1])
                 self.pca_components = min(self.pca_target_components, max_components)
-                
+
                 if self.pca_components < self.pca_target_components:
-                    logger.warning(f"Reducing PCA: {self.pca_target_components} -> {self.pca_components}")
-                
+                    logger.warning(f"Reducing global PCA: {self.pca_target_components} -> {self.pca_components}")
+
                 self.pca = PCA(n_components=self.pca_components)
                 X_out = self.pca.fit_transform(X_scaled)
                 variance = self.pca.explained_variance_ratio_.sum()
-                logger.info(f"PCA: {X_out.shape[1]} components, {variance:.1%} variance")
+                logger.info(f"Global PCA: {X_out.shape[1]} components, {variance:.1%} variance")
             else:
                 X_out = X_scaled
-                logger.info(f"Using raw features: {X_out.shape[1]} dimensions")
+                logger.info(f"Using rebalanced features: {X_out.shape[1]} dimensions")
         else:
-            X_scaled = self.scaler.transform(X)
+            X_rebalanced = self._rebalance_features(X, fit=False)
+            X_scaled = self.scaler.transform(X_rebalanced)
             if self.use_pca and self.pca is not None:
                 X_out = self.pca.transform(X_scaled)
             else:
                 X_out = X_scaled
-        
+
         return X_out
 
     def train(self, X: np.ndarray, y: np.ndarray):
@@ -124,10 +274,14 @@ class EnsembleClassifier:
         logger.info(f"PCA mode: {'enabled' if self.use_pca else 'disabled (raw features)'}")
 
         try:
-            # Augment data
-            X_train, y_train = self._augment_samples(X, y)
-            
-            # Preprocess (scale, optionally PCA)
+            # Step 1: add synthetic partial-fingerprint variants so the
+            # classifier handles early-stopped inference correctly.
+            X_exp, y_exp = self._generate_early_stop_variants(X, y)
+
+            # Step 2: noise augmentation on full + partial variants
+            X_train, y_train = self._augment_samples(X_exp, y_exp)
+
+            # Step 3: Preprocess (rebalance + scale, optionally PCA)
             X_processed = self._preprocess(X_train, fit=True)
             
             logger.info(f"Training features shape: {X_processed.shape}")
@@ -140,6 +294,10 @@ class EnsembleClassifier:
             self.svm.fit(X_processed, y_train)
             
             logger.info("Training MLP...")
+            # MLPClassifier does not support sample_weight or class_weight.
+            # Class imbalance is handled by RF (class_weight='balanced') and
+            # SVM (class_weight='balanced'), which carry more weight in the
+            # ensemble anyway (45% each vs 10% for MLP).
             self.mlp.fit(X_processed, y_train)
 
             self.is_trained = True
@@ -155,51 +313,94 @@ class EnsembleClassifier:
     def predict_with_confidence(self, fingerprint):
         if not self.is_trained:
             logger.error("Classifier not trained")
-            return None, 0.0, {}
+            return None, 0.0, {}, {}
 
         try:
             if fingerprint.ndim == 1:
                 fingerprint = fingerprint.reshape(1, -1)
-            
-            # Preprocess (same pipeline as training)
+
+            # Preprocess (rebalance + scale, optionally PCA)
             fp_processed = self._preprocess(fingerprint, fit=False)
             logger.debug(f"Processed fingerprint shape: {fp_processed.shape}")
-            # Get predictions from each classifier
-            rf_pred = self.rf.predict_proba(fp_processed)[0]
-            svm_pred = self.svm.predict_proba(fp_processed)[0]
-            mlp_pred = self.mlp.predict_proba(fp_processed)[0]
 
-            # MLP can be removed
-            # logger.info(f"Result RF {rf_pred}, svm {svm_pred} and mlp {mlp_pred}")
+            # Get predictions from each classifier and expand to the full
+            # n_classes probability space.
+            #
+            # CRITICAL: sklearn classifiers only emit columns for classes that
+            # appear in the training data.  If a family (e.g. 'gemini') has no
+            # training samples, its class index is absent from rf.classes_ and
+            # the output array is shorter than n_classes.  Naively using the
+            # raw array means every class index after the gap shifts by one —
+            # mistral's probability ends up labelled 'gemini', qwen's as
+            # 'mistral', etc.  We fix this by placing each classifier's output
+            # into the correct slot of a zero-initialised n_classes array.
+            n = self.n_classes
+            rf_pred  = np.zeros(n, dtype=np.float64)
+            svm_pred = np.zeros(n, dtype=np.float64)
+            mlp_pred = np.zeros(n, dtype=np.float64)
+
+            for col, class_id in enumerate(self.rf.classes_):
+                rf_pred[class_id]  = self.rf.predict_proba(fp_processed)[0][col]
+            for col, class_id in enumerate(self.svm.classes_):
+                svm_pred[class_id] = self.svm.predict_proba(fp_processed)[0][col]
+            for col, class_id in enumerate(self.mlp.classes_):
+                mlp_pred[class_id] = self.mlp.predict_proba(fp_processed)[0][col]
+
+            logger.debug(f"RF prediction (aligned):  {rf_pred}")
+            logger.debug(f"SVM prediction (aligned): {svm_pred}")
+            logger.debug(f"MLP prediction (aligned): {mlp_pred}")
+
             # Weighted ensemble
-            logger.debug(f"RF prediction: {rf_pred}")
-            logger.debug(f"SVM prediction: {svm_pred}")
-            logger.debug(f"MLP prediction: {mlp_pred}")
             weights = [0.45, 0.45, 0.10]  # RF, SVM, MLP
             ensemble_pred = (weights[0] * rf_pred +
                            weights[1] * svm_pred +
                            weights[2] * mlp_pred)
             logger.debug(f"Ensemble prediction: {ensemble_pred}")
             top_idx = np.argmax(ensemble_pred)
-            
+
             if top_idx not in self.families_inv:
                 logger.error(f"Predicted class {top_idx} not in family mapping")
-                return None, 0.0, {}
-                
+                return None, 0.0, {}, {}
+
             top_family = self.families_inv[top_idx]
             top_confidence = ensemble_pred[top_idx]
 
-            # Build probability dict
-            probs = {}
-            for i in range(len(ensemble_pred)):
-                if i in self.families_inv:
-                    probs[self.families_inv[i]] = float(ensemble_pred[i])
+            # Build probability dict (only families with training data or > 0)
+            probs = {
+                self.families_inv[i]: float(ensemble_pred[i])
+                for i in range(n)
+                if i in self.families_inv
+            }
 
-            return top_family, float(top_confidence), probs
+            # OOD detection: check confidence and classifier agreement
+            top_per_classifier = [np.argmax(rf_pred), np.argmax(svm_pred), np.argmax(mlp_pred)]
+            agreement_ratio = sum(1 for t in top_per_classifier if t == top_idx) / 3.0
+            confidence_per_classifier = [rf_pred[top_idx], svm_pred[top_idx], mlp_pred[top_idx]]
+            confidence_std = float(np.std(confidence_per_classifier))
+
+            is_ood = (top_confidence < self.ood_confidence_threshold or
+                      (agreement_ratio < 0.67 and confidence_std > self.ood_disagreement_threshold))
+
+            ood_info = {
+                'is_ood': is_ood,
+                'agreement_ratio': agreement_ratio,
+                'confidence_std': confidence_std,
+                'classifier_top_classes': {
+                    'rf':  self.families_inv.get(int(top_per_classifier[0]), '?'),
+                    'svm': self.families_inv.get(int(top_per_classifier[1]), '?'),
+                    'mlp': self.families_inv.get(int(top_per_classifier[2]), '?'),
+                },
+            }
+
+            if is_ood:
+                logger.warning(f"OOD detected: confidence={top_confidence:.3f}, "
+                             f"agreement={agreement_ratio:.2f}, std={confidence_std:.3f}")
+
+            return top_family, float(top_confidence), probs, ood_info
 
         except Exception as e:
             logger.error(f"Prediction failed: {e}")
-            return None, 0.0, {}
+            return None, 0.0, {}, {}
 
     def save(self, filepath):
         """Save trained classifier to file."""
@@ -220,9 +421,18 @@ class EnsembleClassifier:
                 'augment_data': self.augment_data,
                 'augment_noise_std': self.augment_noise_std,
                 'augment_samples': self.augment_samples,
+                # Embedding rebalancing
+                'embedding_pcas': self.embedding_pcas,
+                'embedding_pca_dim': self.embedding_pca_dim,
+                'n_layers': self.n_layers,
+                'per_layer_block_size': self.per_layer_block_size,
+                'per_layer_embed_dim': self.per_layer_embed_dim,
+                # OOD detection
+                'ood_confidence_threshold': self.ood_confidence_threshold,
+                'ood_disagreement_threshold': self.ood_disagreement_threshold,
             }
             joblib.dump(data, filepath)
-            mode = "with PCA" if self.use_pca else "raw features"
+            mode = "with PCA" if self.use_pca else "rebalanced features"
             logger.info(f"Saved classifier ({mode}) to {filepath}")
             return True
         except Exception as e:
@@ -233,7 +443,7 @@ class EnsembleClassifier:
         """Load trained classifier from file."""
         try:
             data = joblib.load(filepath)
-            
+
             self.rf = data['rf']
             self.svm = data['svm']
             self.mlp = data['mlp']
@@ -248,11 +458,22 @@ class EnsembleClassifier:
             self.augment_data = data.get('augment_data', True)
             self.augment_noise_std = data.get('augment_noise_std', 0.01)
             self.augment_samples = data.get('augment_samples', 5)
-            
+
+            # Embedding rebalancing
+            self.embedding_pcas = data.get('embedding_pcas')
+            self.embedding_pca_dim = data.get('embedding_pca_dim', 64)
+            self.n_layers = data.get('n_layers', 3)
+            self.per_layer_block_size = data.get('per_layer_block_size')
+            self.per_layer_embed_dim = data.get('per_layer_embed_dim')
+
+            # OOD detection
+            self.ood_confidence_threshold = data.get('ood_confidence_threshold', 0.3)
+            self.ood_disagreement_threshold = data.get('ood_disagreement_threshold', 0.15)
+
             self.families_inv = {v: k for k, v in self.model_families.items()}
             self.n_classes = len(self.model_families)
-            
-            mode = "with PCA" if self.use_pca else "raw features"
+
+            mode = "with PCA" if self.use_pca else "rebalanced features"
             logger.info(f"Loaded classifier ({mode}) from {filepath}")
             return True
         except Exception as e:
@@ -296,6 +517,20 @@ class EnsembleClassifier:
 
         X = np.array(X_list, dtype=np.float32)
         y = np.array(y_list)
+
+        # Warn about families that are defined in MODEL_FAMILIES but have no
+        # training data.  The underlying sklearn classifiers will silently skip
+        # their class index, shifting all subsequent indices by one and causing
+        # completely wrong label mappings at inference time.  The fix in
+        # predict_with_confidence handles this correctly, but surfacing it here
+        # makes the data gap explicit.
+        missing = [f for f in self.model_families if f not in family_counts]
+        if missing:
+            logger.warning(
+                f"No training data for: {missing}. "
+                f"These families will score 0% at inference — "
+                f"run 'simulate --family <name>' to add them."
+            )
 
         logger.info(f"Training from simulations: {family_counts}")
         return self.train(X, y)
@@ -348,7 +583,7 @@ class EnsembleClassifier:
 
             correct = 0
             for i in range(len(X_val)):
-                family, _, _ = temp.predict_with_confidence(X_val[i])
+                family, _, _, _ = temp.predict_with_confidence(X_val[i])
                 pred_id = self.model_families.get(family, -1)
                 all_y_true.append(int(y_val[i]))
                 all_y_pred.append(pred_id)
@@ -391,9 +626,10 @@ class EnsembleClassifier:
 
 
 ## This function can be changed if you want to build another classifier
-def create_classifier(model_families=None, use_pca=False, **kwargs):
+def create_classifier(model_families=None, use_pca=False, embedding_pca_dim=64, **kwargs):
 
-    return EnsembleClassifier(model_families=model_families, use_pca=use_pca, **kwargs)
+    return EnsembleClassifier(model_families=model_families, use_pca=use_pca,
+                              embedding_pca_dim=embedding_pca_dim, **kwargs)
 
 
 def get_available_classifiers():

@@ -1,10 +1,7 @@
 """LLM Fingerprinter - Black-box LLM model identification system.
-
-Fingerprints LLM responses using 75 discriminative prompts across three layers
-(stylistic, behavioral, discriminative) to identify the underlying model family.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __author__ = "litemars"
 
 from llm_fingerprinter.fingerprinter import LLMFingerprinter
