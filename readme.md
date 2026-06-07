@@ -141,10 +141,10 @@ Requires fingerprints that contain `model_name` in their metadata (all fingerpri
 Add a new model family to the template classifier from a few fingerprint samples, without retraining the full ensemble.
 
 ```bash
-llm-fingerprinter add-family --model deepseek-chat --family deepseek --num-sims 3 -b deepseek
+llm-fingerprinter add-family --model deepseek-chat --family deepseek --num-fps 3 -b deepseek
 ```
 
-Recommended minimum: 3 simulations for a reliable mean template.
+Recommended minimum: 3 fingerprints for a reliable mean template.
 
 ---
 

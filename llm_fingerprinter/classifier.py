@@ -339,12 +339,19 @@ class EnsembleClassifier:
             svm_pred = np.zeros(n, dtype=np.float64)
             mlp_pred = np.zeros(n, dtype=np.float64)
 
+            # Compute each classifier's probabilities ONCE, then scatter the
+            # columns into the correct class slots (predict_proba is expensive —
+            # especially the SVM with Platt scaling — so don't call it per class).
+            rf_proba  = self.rf.predict_proba(fp_processed)[0]
+            svm_proba = self.svm.predict_proba(fp_processed)[0]
+            mlp_proba = self.mlp.predict_proba(fp_processed)[0]
+
             for col, class_id in enumerate(self.rf.classes_):
-                rf_pred[class_id]  = self.rf.predict_proba(fp_processed)[0][col]
+                rf_pred[class_id]  = rf_proba[col]
             for col, class_id in enumerate(self.svm.classes_):
-                svm_pred[class_id] = self.svm.predict_proba(fp_processed)[0][col]
+                svm_pred[class_id] = svm_proba[col]
             for col, class_id in enumerate(self.mlp.classes_):
-                mlp_pred[class_id] = self.mlp.predict_proba(fp_processed)[0][col]
+                mlp_pred[class_id] = mlp_proba[col]
 
             logger.debug(f"RF prediction (aligned):  {rf_pred}")
             logger.debug(f"SVM prediction (aligned): {svm_pred}")
@@ -378,8 +385,15 @@ class EnsembleClassifier:
             confidence_per_classifier = [rf_pred[top_idx], svm_pred[top_idx], mlp_pred[top_idx]]
             confidence_std = float(np.std(confidence_per_classifier))
 
+            # OOD via disagreement only when a MAJORITY of classifiers disagree
+            # with the ensemble's top class. With 3 classifiers agreement_ratio is
+            # one of {0, 0.333, 0.667, 1.0}; the threshold must sit between 0.333
+            # and 0.667 so that 2-of-3 agreement (0.667) does NOT count as
+            # disagreement. (A naive 0.67 fails: 2/3 = 0.6667 < 0.67, so the
+            # common 2-of-3 vote was wrongly flagged OOD → correct predictions
+            # reported as "unknown".)
             is_ood = (top_confidence < self.ood_confidence_threshold or
-                      (agreement_ratio < 0.67 and confidence_std > self.ood_disagreement_threshold))
+                      (agreement_ratio < 0.6 and confidence_std > self.ood_disagreement_threshold))
 
             ood_info = {
                 'is_ood': is_ood,
@@ -555,7 +569,14 @@ class EnsembleClassifier:
         from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
 
         unique_classes = np.unique(y)
-        actual_folds = min(n_folds, min(np.bincount(y.astype(int))))
+        # Base the fold count on the smallest class that ACTUALLY has data.
+        # Reserved/empty families (e.g. a 'gemini' slot with no fingerprints yet)
+        # appear in np.bincount as a 0 count; including them would force
+        # actual_folds to 0 and silently skip cross-validation entirely.
+        class_counts = np.bincount(y.astype(int))
+        present_counts = class_counts[class_counts > 0]
+        smallest_class = present_counts.min() if present_counts.size else 0
+        actual_folds = min(n_folds, int(smallest_class))
         if actual_folds < 2:
             logger.warning("Not enough samples per class for cross-validation")
             return None

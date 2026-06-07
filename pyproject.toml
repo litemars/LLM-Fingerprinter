@@ -64,4 +64,5 @@ Issues = "https://github.com/litemars/LLM-Fingerprinter/issues"
 include = ["llm_fingerprinter*"]
 
 [tool.setuptools.package-data]
-"*" = ["*.joblib"]
+# Ship the pre-trained model inside the package so it travels with the wheel.
+llm_fingerprinter = ["model/*.joblib"]

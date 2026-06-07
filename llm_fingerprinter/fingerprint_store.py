@@ -315,7 +315,8 @@ class FingerprintStore:
             if data and data.get("family"):
                 family = data["family"]
                 
-                # Try to get or reconstruct full 402-dim vector
+                # Try to get or reconstruct the full 1206-dim vector
+                # (3 layers × 402 dims = 384 embed + 12 linguistic + 6 behavioral)
                 vector = self._get_full_vector(data)
                 
                 if vector is None:

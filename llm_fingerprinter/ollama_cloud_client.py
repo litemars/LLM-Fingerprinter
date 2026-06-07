@@ -33,7 +33,7 @@ class OllamaCloudClient(BaseClient):
 
     def __init__(self,
                  api_key: str,
-                 endpoint: str = "https://api.ollama.com/v1",
+                 endpoint: str = "https://ollama.com",
                  timeout: int = 60,
                  max_retries: int = 3):
         super().__init__(timeout=timeout, max_retries=max_retries)
@@ -95,7 +95,8 @@ class OllamaCloudClient(BaseClient):
             "prompt": prompt,
             "stream": False,
             "options": {
-                "temperature": temperature
+                "temperature": temperature,
+                "num_predict": max_tokens,
             }
         }
 

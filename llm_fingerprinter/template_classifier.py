@@ -44,6 +44,19 @@ def _cosine_distances(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     return 1.0 - np.clip(sims, -1.0, 1.0)
 
 
+def _fit_standardizer(stacked: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Fit per-feature (mean, std) over a (N, D) stack of training vectors.
+
+    Constant features (std≈0) get a std of 1.0 so that, after centering, they
+    become exactly 0 and contribute nothing to the cosine distance instead of
+    blowing up via division by a tiny number.
+    """
+    mean = stacked.mean(axis=0)
+    std = stacked.std(axis=0)
+    std = np.where(std > 1e-8, std, 1.0)
+    return mean.astype(np.float32), std.astype(np.float32)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TemplateClassifier
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,11 +76,28 @@ class TemplateClassifier:
         self.templates: dict[str, np.ndarray] = {}   # family -> mean vector
         self.ood_ratio_threshold = ood_ratio_threshold
         self._ood_radius: float | None = None         # calibrated from training
+        # Per-feature standardizer (mean/std) fitted across all training
+        # vectors at build() time. Templates and queries are standardized with
+        # these before any cosine distance is computed — see build() for why.
+        self._feat_mean: np.ndarray | None = None
+        self._feat_std: np.ndarray | None = None
         self.is_built = False
         # Optional model_name -> family mapping (populated by build-model-templates).
         # When present, classify() returns an inferred_family so that identify()
         # can recover the correct family even when the ensemble is OOD.
         self.model_families: dict[str, str] = {}
+
+    # ── Internal: feature standardization ──────────────────────────────────────
+
+    def _apply_scaler(self, X: np.ndarray) -> np.ndarray:
+        """Standardize a vector (D,) or matrix (N, D) with the fitted scaler.
+
+        Returns X unchanged when no scaler has been fitted (e.g. a fresh store
+        populated only via add_family), preserving backward-compatible behaviour.
+        """
+        if self._feat_mean is None or self._feat_std is None:
+            return X
+        return ((X - self._feat_mean) / self._feat_std).astype(np.float32)
 
     # ── Build / update ───────────────────────────────────────────────────────
 
@@ -95,12 +125,26 @@ class TemplateClassifier:
         self.model_families = model_families or {}
         intra_distances: list[float] = []
 
+        # ── Fit a per-feature standardizer across ALL training vectors ──────────
+        # Without this, cosine distance on the raw 1206-dim vector is dominated
+        # by the handful of large-magnitude linguistic counts (total_chars ≈ 1000)
+        # while the 384-dim semantic embeddings (≈0.02 each) contribute ~0% of the
+        # vector's energy — turning the classifier into a response-length
+        # comparator. Standardizing puts every feature on equal footing, the same
+        # way the ensemble classifier's StandardScaler does.
+        all_vecs = [np.asarray(v, dtype=np.float32)
+                    for vs in simulation_data.values() for v in vs]
+        if not all_vecs:
+            logger.error("No vectors in simulation data — templates not built")
+            return False
+        self._feat_mean, self._feat_std = _fit_standardizer(np.stack(all_vecs))
+
         for family, vectors in simulation_data.items():
             if not vectors:
                 logger.warning(f"Skipping '{family}': no vectors")
                 continue
 
-            vecs = np.array(vectors, dtype=np.float32)
+            vecs = self._apply_scaler(np.array(vectors, dtype=np.float32))
             mean_vec = vecs.mean(axis=0)
             self.templates[family] = mean_vec
 
@@ -147,7 +191,13 @@ class TemplateClassifier:
                 f"recommend >= 3 for a reliable template"
             )
 
-        vecs = np.array(vectors, dtype=np.float32)
+        if self._feat_mean is None:
+            logger.warning(
+                f"Adding '{family_name}' to a store with no fitted standardizer — "
+                f"template stored in raw feature space. Run 'build-templates' to "
+                f"refit the standardizer across all families for best accuracy."
+            )
+        vecs = self._apply_scaler(np.array(vectors, dtype=np.float32))
         self.templates[family_name] = vecs.mean(axis=0)
         self.is_built = True
         logger.info(
@@ -162,7 +212,9 @@ class TemplateClassifier:
         """Classify a fingerprint by nearest template.
 
         Args:
-            fingerprint: Raw 1206-dim feature vector (same as ensemble input)
+            fingerprint: Raw 1206-dim feature vector (same as ensemble input).
+                         It is standardized internally with the fitted scaler
+                         before distances are computed.
             top_k:       Number of ranked candidates to return
 
         Returns:
@@ -179,7 +231,7 @@ class TemplateClassifier:
                 "Templates not built. Call build() first or load() from disk."
             )
 
-        fp = fingerprint.astype(np.float32).ravel()
+        fp = self._apply_scaler(fingerprint.astype(np.float32).ravel())
         families = list(self.templates.keys())
         template_matrix = np.stack([self.templates[f] for f in families])
 
@@ -240,6 +292,8 @@ class TemplateClassifier:
                     "ood_radius": self._ood_radius,
                     "is_built": self.is_built,
                     "model_families": self.model_families,
+                    "feat_mean": self._feat_mean,
+                    "feat_std": self._feat_std,
                 },
                 filepath,
             )
@@ -260,6 +314,8 @@ class TemplateClassifier:
             self._ood_radius = data.get("ood_radius")
             self.is_built = data.get("is_built", True)
             self.model_families = data.get("model_families", {})
+            self._feat_mean = data.get("feat_mean")
+            self._feat_std = data.get("feat_std")
             return True
         except FileNotFoundError:
             logger.debug(f"Templates file not found: {filepath}")

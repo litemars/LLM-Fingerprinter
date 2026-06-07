@@ -641,12 +641,12 @@ def list_fingerprints():
     click.echo(f"\n  Total: {total}")
 
     # ── By model (for build-model-templates) ─────────────────────────────────
-    known_models = {m: c for m, c in model_counts.items()
-                    if not any(x in m for x in ('_sim', '_t0', '_t25', '_t50', '_t75', '_t100'))}
-    if known_models:
+    # export_by_model() keys on the clean metadata model_name (e.g. "gpt-4o-mini"),
+    # so every entry here is a usable model name — no save-name filtering needed.
+    if model_counts:
         click.echo("\n🔬 By model (for build-model-templates):\n")
-        for mdl in sorted(known_models.keys()):
-            cnt = known_models[mdl]
+        for mdl in sorted(model_counts.keys()):
+            cnt = model_counts[mdl]
             flag = "" if cnt >= 3 else click.style("  ⚠️ <3 samples", fg='yellow')
             click.echo(f"  {mdl:28s} {cnt:3d}{flag}")
 
@@ -704,8 +704,14 @@ def info():
     
     click.echo(f"\n📋 Families: {', '.join(sorted(config.MODEL_FAMILIES.keys()))}")
     
-    store = FingerprintStore(str(config.FINGERPRINTS_DIR))
-    counts = store.count_by_family()
+    # Aggregate across training/ and the legacy top-level fingerprints/ dir.
+    # (count_by_family globs non-recursively, so reading only FINGERPRINTS_DIR
+    # misses everything under training/ — where 'simulate' actually saves.)
+    counts = {}
+    for directory in [config.TRAINING_DIR, config.FINGERPRINTS_DIR]:
+        store = FingerprintStore(str(directory))
+        for fam, cnt in store.count_by_family().items():
+            counts[fam] = counts.get(fam, 0) + cnt
     classifier_path = config.MODEL_DIR / "classifier_model.joblib"
     
     click.echo(f"\n📊 Status:")

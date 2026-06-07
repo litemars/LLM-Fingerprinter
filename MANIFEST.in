@@ -3,8 +3,8 @@ include readme.md
 include requirements.txt
 include pyproject.toml
 
-# Pre-trained model
-recursive-include model *.joblib
+# Pre-trained model (bundled inside the package so it ships in the wheel)
+recursive-include llm_fingerprinter/model *.joblib
 
 # Example request templates
 recursive-include example *.txt

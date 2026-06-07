@@ -21,8 +21,9 @@ MODEL_FAMILIES = {
     "gpt": 0,
     "qwen": 1,
     "llama": 2,
-    "gemini": 3,
-    "mistral": 4
+    "gemini": 3,    # reserved for real Gemini-API models (no data yet)
+    "mistral": 4,
+    "gemma": 5      # Google Gemma open models — distinct from Gemini
 }
 
 
@@ -66,8 +67,11 @@ TEMPLATES_PATH = MODEL_DIR / "templates.joblib"
 MODEL_TEMPLATES_PATH = MODEL_DIR / "model_templates.joblib"
 LOGS_DIR = BASE_DIR / "logs"
 
-# Bundled pre-trained model (shipped with the package)
-BUNDLED_MODEL_DIR = PACKAGE_DIR.parent / "model"
+# Bundled pre-trained model — shipped INSIDE the package so it travels with the
+# wheel (see [tool.setuptools.package-data] in pyproject.toml). PACKAGE_DIR is
+# llm_fingerprinter/, so this is llm_fingerprinter/model/ — importable and
+# read-only after install, unlike MODEL_DIR which is the writable runtime dir.
+BUNDLED_MODEL_DIR = PACKAGE_DIR / "model"
 
 # Ensure directories exist
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -76,11 +80,18 @@ TRAINING_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Copy bundled model to user data dir if not already present
-_bundled_classifier = BUNDLED_MODEL_DIR / "classifier_model.joblib"
-_user_classifier = MODEL_DIR / "classifier_model.joblib"
-if _bundled_classifier.exists() and not _user_classifier.exists():
-    shutil.copy2(_bundled_classifier, _user_classifier)
+# Bootstrap: copy any bundled artifacts the user doesn't already have into the
+# writable runtime dir, so a fresh install can `identify` out of the box without
+# retraining. Copies the classifier AND the family/model templates (not just the
+# classifier), so two-stage identification works immediately too.
+if BUNDLED_MODEL_DIR.exists() and BUNDLED_MODEL_DIR.resolve() != MODEL_DIR.resolve():
+    for _bundled in BUNDLED_MODEL_DIR.glob("*.joblib"):
+        _dest = MODEL_DIR / _bundled.name
+        if not _dest.exists():
+            try:
+                shutil.copy2(_bundled, _dest)
+            except Exception:
+                pass
 
 # Feature extraction
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
