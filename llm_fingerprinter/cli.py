@@ -167,6 +167,14 @@ def print_report(result: dict):
         for rr in model_est.get('ranked', [])[1:4]:
             click.echo(f"    {rr['family']:26s} dist={rr['distance']:.4f}")
 
+    # ── Note when template estimates were skipped (early-stopped) ──────────────
+    elif result.get('templates_skipped_reason') == 'early_stopped':
+        click.echo(click.style(
+            "\n  ℹ️  Model-level estimate skipped — early-stopped fingerprint is"
+            " partial and not comparable to the full-fingerprint templates."
+            "\n     Run with --early-stop 0 for a model-level estimate.",
+            fg='cyan'))
+
     # ── Template warning — ONLY shown when it adds new information ─────────────
     # (disagrees with ensemble, or flags the model as unknown/OOD)
     # In the normal case where template agrees, it stays silent.
@@ -318,8 +326,14 @@ def identify(ctx, backend, endpoint, api_key, request_file, model, repeats, earl
 
         fp_vec = result.get('fingerprint', {}).get('vector')
 
+        early_stopped = result.get('early_stopped', False)
+        if early_stopped:
+            result['templates_skipped_reason'] = 'early_stopped'
+            logger.info("Early-stopped fingerprint is partial — skipping template "
+                        "classifiers (they require a full fingerprint).")
+
         # Model-level template — specific model identification
-        if config.MODEL_TEMPLATES_PATH.exists() and fp_vec is not None:
+        if not early_stopped and config.MODEL_TEMPLATES_PATH.exists() and fp_vec is not None:
             mtc = TemplateClassifier()
             if mtc.load(str(config.MODEL_TEMPLATES_PATH)):
                 try:
@@ -355,7 +369,7 @@ def identify(ctx, backend, endpoint, api_key, request_file, model, repeats, earl
                     logger.debug(f"Model template classify failed: {_mt_err}")
 
         # Family-level template classifier — optional open-set second opinion
-        if config.TEMPLATES_PATH.exists() and fp_vec is not None:
+        if not early_stopped and config.TEMPLATES_PATH.exists() and fp_vec is not None:
             tc = TemplateClassifier()
             if tc.load(str(config.TEMPLATES_PATH)):
                 try:
