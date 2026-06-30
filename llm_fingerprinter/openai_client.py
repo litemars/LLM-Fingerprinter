@@ -6,11 +6,8 @@ from llm_fingerprinter.base_client import BaseClient, ClientError
 
 logger = logging.getLogger(__name__)
 
-# Reasoning models (o1/o3/o4, gpt-5 family) spend hidden reasoning tokens BEFORE
-# the visible answer, and `max_completion_tokens` bounds reasoning + output
-# combined. Capping at the visible target alone would let reasoning consume the
-# whole budget and return an empty/truncated answer, so we add this headroom on
-# top of the requested visible length for reasoning models only.
+# Headroom added to max_completion_tokens for reasoning models, whose hidden
+# reasoning tokens share the budget with the visible answer.
 REASONING_TOKEN_BUFFER = 4096
 
 
@@ -97,10 +94,8 @@ class OpenAIClient(BaseClient):
 
     @staticmethod
     def _is_reasoning_model(model: Optional[str]) -> bool:
-        """Reasoning models (o1/o3/o4 and the gpt-5 family) have different rules:
-        they reject the `temperature` parameter (only the default 1.0 is allowed)
-        and require `max_completion_tokens` instead of the legacy `max_tokens`.
-        """
+        """Reasoning models (o1/o3/o4, gpt-5) reject `temperature` and need
+        `max_completion_tokens` instead of `max_tokens`."""
         if not model:
             return False
         m = model.lower().lstrip()
@@ -115,16 +110,12 @@ class OpenAIClient(BaseClient):
                 messages.append({"role": "system", "content": system})
             messages.append({"role": "user", "content": prompt})
 
-            # Forward sampling controls. Reasoning models need a different
-            # parameter set, so branch on the model name.
             if self._is_reasoning_model(model):
                 params = {
                     "model": model,
                     "messages": messages,
-                    # Headroom so hidden reasoning tokens don't starve the visible
-                    # answer (see REASONING_TOKEN_BUFFER note above).
                     "max_completion_tokens": max_tokens + REASONING_TOKEN_BUFFER,
-                    # temperature intentionally omitted — only default is allowed
+                    # temperature omitted — reasoning models only allow the default
                 }
             else:
                 params = {
@@ -137,15 +128,11 @@ class OpenAIClient(BaseClient):
             try:
                 response = self.client.chat.completions.create(**params)
             except self._openai_module.BadRequestError as e:
-                # Some models / OpenAI-compatible endpoints reject temperature
-                # or max_tokens. Retry once with the most compatible param set
-                # (drop temperature, use max_completion_tokens).
+                # Retry once dropping temperature for endpoints/models that reject it.
                 msg = str(e).lower()
                 if any(k in msg for k in ("temperature", "max_tokens", "max_completion_tokens")):
                     logger.warning(f"{model}: retrying without unsupported sampling "
                                    f"params ({e})")
-                    # Apply the reasoning headroom here too so the fallback path
-                    # doesn't starve reasoning models' visible output.
                     retry_budget = max_tokens + (
                         REASONING_TOKEN_BUFFER if self._is_reasoning_model(model) else 0
                     )

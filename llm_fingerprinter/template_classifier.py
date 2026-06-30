@@ -45,12 +45,7 @@ def _cosine_distances(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:
 
 
 def _fit_standardizer(stacked: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Fit per-feature (mean, std) over a (N, D) stack of training vectors.
-
-    Constant features (std≈0) get a std of 1.0 so that, after centering, they
-    become exactly 0 and contribute nothing to the cosine distance instead of
-    blowing up via division by a tiny number.
-    """
+    """Per-feature (mean, std) over a (N, D) stack. Constant features get std=1."""
     mean = stacked.mean(axis=0)
     std = stacked.std(axis=0)
     std = np.where(std > 1e-8, std, 1.0)
@@ -76,25 +71,17 @@ class TemplateClassifier:
         self.templates: dict[str, np.ndarray] = {}   # family -> mean vector
         self.ood_ratio_threshold = ood_ratio_threshold
         self._ood_radius: float | None = None         # calibrated from training
-        # Per-feature standardizer (mean/std) fitted across all training
-        # vectors at build() time. Templates and queries are standardized with
-        # these before any cosine distance is computed — see build() for why.
+        # Per-feature standardizer, fitted in build().
         self._feat_mean: np.ndarray | None = None
         self._feat_std: np.ndarray | None = None
         self.is_built = False
-        # Optional model_name -> family mapping (populated by build-model-templates).
-        # When present, classify() returns an inferred_family so that identify()
-        # can recover the correct family even when the ensemble is OOD.
+        # model_name -> family, set by build-model-templates for OOD family recovery.
         self.model_families: dict[str, str] = {}
 
     # ── Internal: feature standardization ──────────────────────────────────────
 
     def _apply_scaler(self, X: np.ndarray) -> np.ndarray:
-        """Standardize a vector (D,) or matrix (N, D) with the fitted scaler.
-
-        Returns X unchanged when no scaler has been fitted (e.g. a fresh store
-        populated only via add_family), preserving backward-compatible behaviour.
-        """
+        """Standardize X (D,) or (N, D); no-op if no scaler was fitted."""
         if self._feat_mean is None or self._feat_std is None:
             return X
         return ((X - self._feat_mean) / self._feat_std).astype(np.float32)
@@ -125,13 +112,8 @@ class TemplateClassifier:
         self.model_families = model_families or {}
         intra_distances: list[float] = []
 
-        # ── Fit a per-feature standardizer across ALL training vectors ──────────
-        # Without this, cosine distance on the raw 1206-dim vector is dominated
-        # by the handful of large-magnitude linguistic counts (total_chars ≈ 1000)
-        # while the 384-dim semantic embeddings (≈0.02 each) contribute ~0% of the
-        # vector's energy — turning the classifier into a response-length
-        # comparator. Standardizing puts every feature on equal footing, the same
-        # way the ensemble classifier's StandardScaler does.
+        # Standardize first — otherwise cosine distance is dominated by the
+        # large-magnitude linguistic counts and embeddings contribute ~0%.
         all_vecs = [np.asarray(v, dtype=np.float32)
                     for vs in simulation_data.values() for v in vs]
         if not all_vecs:
@@ -212,9 +194,7 @@ class TemplateClassifier:
         """Classify a fingerprint by nearest template.
 
         Args:
-            fingerprint: Raw 1206-dim feature vector (same as ensemble input).
-                         It is standardized internally with the fitted scaler
-                         before distances are computed.
+            fingerprint: Raw 1206-dim feature vector (standardized internally).
             top_k:       Number of ranked candidates to return
 
         Returns:

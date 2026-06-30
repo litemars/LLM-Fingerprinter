@@ -82,35 +82,11 @@ class EnsembleClassifier:
                     f"embedding rebalancing {embedding_pca_dim}d")
 
     def _generate_early_stop_variants(self, X: np.ndarray, y: np.ndarray):
-        """Generate synthetic partial fingerprints that mirror early-stopped inference.
+        """Add synthetic partial fingerprints matching early-stopped inference.
 
-        When early stopping fires after layer k, fingerprint_model fills the
-        remaining (n_layers - k) layer blocks with the mean of the k completed
-        blocks — see _build_partial_fingerprint.  Without training examples in
-        that format the classifier receives completely alien inputs whenever
-        early stopping is used.
-
-        For each full training fingerprint this method creates one synthetic
-        variant per possible early-stop point (after layer 1, after layer 2, …)
-        using the identical padding rule:
-
-            fallback = mean(completed layer blocks)
-            remaining blocks ← fallback
-
-        The variants carry the same family label as the original, so the
-        classifier learns "identify the family from whatever layers are real,
-        regardless of how many were completed."
-
-        Call order in train(): before _augment_samples so that noise
-        augmentation is applied uniformly to both full and partial fingerprints.
-
-        Args:
-            X: (n_samples, n_layers * per_layer_dim) full training fingerprints
-            y: (n_samples,) family labels
-
-        Returns:
-            X_out: original rows + all synthetic partial variants stacked
-            y_out: repeated labels (same length as X_out)
+        Mirrors _build_partial_fingerprint's padding rule (remaining layers =
+        mean of completed ones) for each early-stop point, with the same labels,
+        so the classifier handles partial fingerprints. Run before augmentation.
         """
         n_features = X.shape[1]
         if n_features % self.n_layers != 0:
@@ -149,13 +125,9 @@ class EnsembleClassifier:
         return X_out, y_out
 
     def _augment_samples(self, X: np.ndarray, y: np.ndarray):
-        """Augment training data with additive Gaussian noise scaled to each
-        feature's standard deviation, clipped to the observed per-feature range.
-
-        Using std-scaled additive noise (not multiplicative) ensures that
-        near-zero features (e.g. refusal_score for non-refusing models) are
-        still perturbed — multiplicative noise would leave them unchanged.
-        """
+        """Augment with additive Gaussian noise scaled per-feature std, clipped to
+        the observed range. Additive (not multiplicative) so near-zero features
+        still get perturbed."""
         if not self.augment_data or len(X) == 0:
             return X, y
 
@@ -294,10 +266,7 @@ class EnsembleClassifier:
             self.svm.fit(X_processed, y_train)
             
             logger.info("Training MLP...")
-            # MLPClassifier does not support sample_weight or class_weight.
-            # Class imbalance is handled by RF (class_weight='balanced') and
-            # SVM (class_weight='balanced'), which carry more weight in the
-            # ensemble anyway (45% each vs 10% for MLP).
+            # MLP has no class_weight; imbalance is handled by RF/SVM (balanced).
             self.mlp.fit(X_processed, y_train)
 
             self.is_trained = True
@@ -323,25 +292,16 @@ class EnsembleClassifier:
             fp_processed = self._preprocess(fingerprint, fit=False)
             logger.debug(f"Processed fingerprint shape: {fp_processed.shape}")
 
-            # Get predictions from each classifier and expand to the full
-            # n_classes probability space.
-            #
-            # CRITICAL: sklearn classifiers only emit columns for classes that
-            # appear in the training data.  If a family (e.g. 'gemini') has no
-            # training samples, its class index is absent from rf.classes_ and
-            # the output array is shorter than n_classes.  Naively using the
-            # raw array means every class index after the gap shifts by one —
-            # mistral's probability ends up labelled 'gemini', qwen's as
-            # 'mistral', etc.  We fix this by placing each classifier's output
-            # into the correct slot of a zero-initialised n_classes array.
+            # Expand each classifier's output into the full n_classes space.
+            # sklearn only emits columns for classes seen in training, so a
+            # family with no samples (e.g. 'gemini') is missing from classes_;
+            # scatter by class_id into a zeroed array to keep labels aligned.
             n = self.n_classes
             rf_pred  = np.zeros(n, dtype=np.float64)
             svm_pred = np.zeros(n, dtype=np.float64)
             mlp_pred = np.zeros(n, dtype=np.float64)
 
-            # Compute each classifier's probabilities ONCE, then scatter the
-            # columns into the correct class slots (predict_proba is expensive —
-            # especially the SVM with Platt scaling — so don't call it per class).
+            # predict_proba once each (SVM Platt scaling is costly), then scatter.
             rf_proba  = self.rf.predict_proba(fp_processed)[0]
             svm_proba = self.svm.predict_proba(fp_processed)[0]
             mlp_proba = self.mlp.predict_proba(fp_processed)[0]
@@ -385,13 +345,8 @@ class EnsembleClassifier:
             confidence_per_classifier = [rf_pred[top_idx], svm_pred[top_idx], mlp_pred[top_idx]]
             confidence_std = float(np.std(confidence_per_classifier))
 
-            # OOD via disagreement only when a MAJORITY of classifiers disagree
-            # with the ensemble's top class. With 3 classifiers agreement_ratio is
-            # one of {0, 0.333, 0.667, 1.0}; the threshold must sit between 0.333
-            # and 0.667 so that 2-of-3 agreement (0.667) does NOT count as
-            # disagreement. (A naive 0.67 fails: 2/3 = 0.6667 < 0.67, so the
-            # common 2-of-3 vote was wrongly flagged OOD → correct predictions
-            # reported as "unknown".)
+            # Threshold 0.6 keeps a 2-of-3 vote (0.667) from counting as
+            # disagreement; only a minority agreeing flags OOD.
             is_ood = (top_confidence < self.ood_confidence_threshold or
                       (agreement_ratio < 0.6 and confidence_std > self.ood_disagreement_threshold))
 
@@ -532,12 +487,8 @@ class EnsembleClassifier:
         X = np.array(X_list, dtype=np.float32)
         y = np.array(y_list)
 
-        # Warn about families that are defined in MODEL_FAMILIES but have no
-        # training data.  The underlying sklearn classifiers will silently skip
-        # their class index, shifting all subsequent indices by one and causing
-        # completely wrong label mappings at inference time.  The fix in
-        # predict_with_confidence handles this correctly, but surfacing it here
-        # makes the data gap explicit.
+        # Surface families defined in MODEL_FAMILIES but with no training data
+        # (handled at inference, but worth flagging).
         missing = [f for f in self.model_families if f not in family_counts]
         if missing:
             logger.warning(
@@ -569,10 +520,8 @@ class EnsembleClassifier:
         from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
 
         unique_classes = np.unique(y)
-        # Base the fold count on the smallest class that ACTUALLY has data.
-        # Reserved/empty families (e.g. a 'gemini' slot with no fingerprints yet)
-        # appear in np.bincount as a 0 count; including them would force
-        # actual_folds to 0 and silently skip cross-validation entirely.
+        # Fold count from the smallest non-empty class — reserved/empty families
+        # show up as a 0 count and would otherwise force folds to 0.
         class_counts = np.bincount(y.astype(int))
         present_counts = class_counts[class_counts > 0]
         smallest_class = present_counts.min() if present_counts.size else 0

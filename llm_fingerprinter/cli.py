@@ -348,11 +348,8 @@ def identify(ctx, backend, endpoint, api_key, request_file, model, repeats, earl
                     }
                     click.echo(f"🔬 Model templates: {len(mtc.templates)} models loaded")
 
-                    # ── Family recovery from model template ───────────────
-                    # When the ensemble is OOD (uncertain) but the model-
-                    # template match is clear and high-confidence, trust the
-                    # family label that was stored at build-model-templates
-                    # time rather than the ensemble's confused best guess.
+                    # If the ensemble is OOD but the model-template match is
+                    # confident, trust its stored family label.
                     me = result['model_estimate']
                     if (result.get('ood_detected')
                             and not me['is_ood']
@@ -655,8 +652,6 @@ def list_fingerprints():
     click.echo(f"\n  Total: {total}")
 
     # ── By model (for build-model-templates) ─────────────────────────────────
-    # export_by_model() keys on the clean metadata model_name (e.g. "gpt-4o-mini"),
-    # so every entry here is a usable model name — no save-name filtering needed.
     if model_counts:
         click.echo("\n🔬 By model (for build-model-templates):\n")
         for mdl in sorted(model_counts.keys()):
@@ -718,9 +713,7 @@ def info():
     
     click.echo(f"\n📋 Families: {', '.join(sorted(config.MODEL_FAMILIES.keys()))}")
     
-    # Aggregate across training/ and the legacy top-level fingerprints/ dir.
-    # (count_by_family globs non-recursively, so reading only FINGERPRINTS_DIR
-    # misses everything under training/ — where 'simulate' actually saves.)
+    # Count across training/ and the legacy top-level dir (glob is non-recursive).
     counts = {}
     for directory in [config.TRAINING_DIR, config.FINGERPRINTS_DIR]:
         store = FingerprintStore(str(directory))

@@ -39,20 +39,9 @@ class LLMFingerprinter:
                                    layer_features: dict,
                                    completed_layers: list,
                                    layer_order: list) -> np.ndarray:
-        """Build a full-dimensional fingerprint for early-stopping confidence checks.
-
-        Completed layers use their actual averaged features.
-        Missing layers are padded with the mean of completed layers — the best
-        available approximation that keeps the vector classifier-compatible.
-
-        Args:
-            layer_features:   dict mapping layer name -> list of per-prompt feature vecs
-            completed_layers: layers that have been fully executed so far
-            layer_order:      canonical concatenation order (from config.LAYER_ORDER)
-
-        Returns:
-            np.ndarray of shape (n_layers * feat_dim,)
-        """
+        """Full-dimensional fingerprint for early-stop confidence checks: completed
+        layers use their averaged features, missing layers are padded with the mean
+        of completed ones."""
         feat_dim = self.extractor.get_feature_dim()
 
         completed_avgs = {
