@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-fingerprinter"
-version = "0.3.0"
+version = "0.4.0"
 description = "Black-box LLM fingerprinting system for model identification"
 readme = "readme.md"
 license = {text = "MIT"}
@@ -64,4 +64,5 @@ Issues = "https://github.com/litemars/LLM-Fingerprinter/issues"
 include = ["llm_fingerprinter*"]
 
 [tool.setuptools.package-data]
-"*" = ["*.joblib"]
+# Ship the pre-trained model inside the package so it travels with the wheel.
+llm_fingerprinter = ["model/*.joblib"]

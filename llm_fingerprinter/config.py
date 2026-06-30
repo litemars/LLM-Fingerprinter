@@ -21,34 +21,22 @@ MODEL_FAMILIES = {
     "gpt": 0,
     "qwen": 1,
     "llama": 2,
-    "gemini": 3,
-    "mistral": 4
+    "gemini": 3,    # reserved for real Gemini-API models (no data yet)
+    "mistral": 4,
+    "gemma": 5      # Google Gemma open models — distinct from Gemini
 }
 
 
 def _find_project_root() -> Path:
-    """Walk up from CWD to find the project root.
-
-    Looks for setup.py or .git as markers. This works correctly whether
-    the package is installed normally (pip install .), in editable mode
-    (pip install -e .), or run directly — because CWD is always where
-    the user launched the command from, not inside the venv.
-    """
+    """Walk up from CWD to find the project root (marked by setup.py or .git)."""
     for path in [Path.cwd(), *Path.cwd().parents]:
         if (path / "setup.py").exists() or (path / ".git").exists():
             return path
-    # Fallback: CWD itself (user may be running from project root directly)
     return Path.cwd()
 
 
 def _get_data_dir() -> Path:
-    """Get the data directory for runtime files.
-
-    Uses LLM_FINGERPRINTER_DATA env var if set, otherwise finds the
-    project root by walking up from the current working directory.
-
-    Override with the LLM_FINGERPRINTER_DATA env var if needed.
-    """
+    """Runtime data dir: LLM_FINGERPRINTER_DATA, else the project root."""
     env_dir = os.environ.get("LLM_FINGERPRINTER_DATA")
     if env_dir:
         return Path(env_dir)
@@ -56,18 +44,47 @@ def _get_data_dir() -> Path:
     return _find_project_root()
 
 
+def _running_from_source() -> bool:
+    """True when imported from a source checkout, not an installed package."""
+    parts = set(PACKAGE_DIR.parts)
+    return "site-packages" not in parts and "dist-packages" not in parts
+
+
+def _dir_writable(path: Path) -> bool:
+    """Whether files can be created under `path` (probes nearest existing parent)."""
+    probe = path
+    while not probe.exists():
+        probe = probe.parent
+    return os.access(probe, os.W_OK)
+
+
+def _get_model_dir(base_dir: Path) -> Path:
+    """Where model artifacts are read/written: LLM_FINGERPRINTER_MODEL, else the
+    in-package dir when run from a writable source checkout (so `train` updates the
+    bundled model directly), else base_dir/model for installed packages."""
+    env_dir = os.environ.get("LLM_FINGERPRINTER_MODEL")
+    if env_dir:
+        return Path(env_dir)
+    pkg_model = PACKAGE_DIR / "model"
+    if _running_from_source() and _dir_writable(pkg_model):
+        return pkg_model
+    return base_dir / "model"
+
+
 # Paths
 BASE_DIR = _get_data_dir()
 FINGERPRINTS_DIR = BASE_DIR / "fingerprints"
 TRAINING_DIR = FINGERPRINTS_DIR / "training"   # simulation data for training
 RESULTS_DIR = FINGERPRINTS_DIR / "results"     # inference/identification results
-MODEL_DIR = BASE_DIR / "model"
+MODEL_DIR = _get_model_dir(BASE_DIR)           # bundled package dir when run from source
 TEMPLATES_PATH = MODEL_DIR / "templates.joblib"
 MODEL_TEMPLATES_PATH = MODEL_DIR / "model_templates.joblib"
 LOGS_DIR = BASE_DIR / "logs"
 
-# Bundled pre-trained model (shipped with the package)
-BUNDLED_MODEL_DIR = PACKAGE_DIR.parent / "model"
+# Pre-trained model shipped inside the package so it ships in the wheel. Equals
+# MODEL_DIR when run from source; for installed packages the bootstrap below seeds
+# the separate runtime MODEL_DIR from it.
+BUNDLED_MODEL_DIR = PACKAGE_DIR / "model"
 
 # Ensure directories exist
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -76,11 +93,16 @@ TRAINING_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Copy bundled model to user data dir if not already present
-_bundled_classifier = BUNDLED_MODEL_DIR / "classifier_model.joblib"
-_user_classifier = MODEL_DIR / "classifier_model.joblib"
-if _bundled_classifier.exists() and not _user_classifier.exists():
-    shutil.copy2(_bundled_classifier, _user_classifier)
+# Seed the runtime dir with any bundled artifacts it's missing, so a fresh
+# install can identify out of the box.
+if BUNDLED_MODEL_DIR.exists() and BUNDLED_MODEL_DIR.resolve() != MODEL_DIR.resolve():
+    for _bundled in BUNDLED_MODEL_DIR.glob("*.joblib"):
+        _dest = MODEL_DIR / _bundled.name
+        if not _dest.exists():
+            try:
+                shutil.copy2(_bundled, _dest)
+            except Exception:
+                pass
 
 # Feature extraction
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"

@@ -167,6 +167,14 @@ def print_report(result: dict):
         for rr in model_est.get('ranked', [])[1:4]:
             click.echo(f"    {rr['family']:26s} dist={rr['distance']:.4f}")
 
+    # ── Note when template estimates were skipped (early-stopped) ──────────────
+    elif result.get('templates_skipped_reason') == 'early_stopped':
+        click.echo(click.style(
+            "\n  ℹ️  Model-level estimate skipped — early-stopped fingerprint is"
+            " partial and not comparable to the full-fingerprint templates."
+            "\n     Run with --early-stop 0 for a model-level estimate.",
+            fg='cyan'))
+
     # ── Template warning — ONLY shown when it adds new information ─────────────
     # (disagrees with ensemble, or flags the model as unknown/OOD)
     # In the normal case where template agrees, it stays silent.
@@ -318,8 +326,14 @@ def identify(ctx, backend, endpoint, api_key, request_file, model, repeats, earl
 
         fp_vec = result.get('fingerprint', {}).get('vector')
 
+        early_stopped = result.get('early_stopped', False)
+        if early_stopped:
+            result['templates_skipped_reason'] = 'early_stopped'
+            logger.info("Early-stopped fingerprint is partial — skipping template "
+                        "classifiers (they require a full fingerprint).")
+
         # Model-level template — specific model identification
-        if config.MODEL_TEMPLATES_PATH.exists() and fp_vec is not None:
+        if not early_stopped and config.MODEL_TEMPLATES_PATH.exists() and fp_vec is not None:
             mtc = TemplateClassifier()
             if mtc.load(str(config.MODEL_TEMPLATES_PATH)):
                 try:
@@ -334,11 +348,8 @@ def identify(ctx, backend, endpoint, api_key, request_file, model, repeats, earl
                     }
                     click.echo(f"🔬 Model templates: {len(mtc.templates)} models loaded")
 
-                    # ── Family recovery from model template ───────────────
-                    # When the ensemble is OOD (uncertain) but the model-
-                    # template match is clear and high-confidence, trust the
-                    # family label that was stored at build-model-templates
-                    # time rather than the ensemble's confused best guess.
+                    # If the ensemble is OOD but the model-template match is
+                    # confident, trust its stored family label.
                     me = result['model_estimate']
                     if (result.get('ood_detected')
                             and not me['is_ood']
@@ -355,7 +366,7 @@ def identify(ctx, backend, endpoint, api_key, request_file, model, repeats, earl
                     logger.debug(f"Model template classify failed: {_mt_err}")
 
         # Family-level template classifier — optional open-set second opinion
-        if config.TEMPLATES_PATH.exists() and fp_vec is not None:
+        if not early_stopped and config.TEMPLATES_PATH.exists() and fp_vec is not None:
             tc = TemplateClassifier()
             if tc.load(str(config.TEMPLATES_PATH)):
                 try:
@@ -641,12 +652,10 @@ def list_fingerprints():
     click.echo(f"\n  Total: {total}")
 
     # ── By model (for build-model-templates) ─────────────────────────────────
-    known_models = {m: c for m, c in model_counts.items()
-                    if not any(x in m for x in ('_sim', '_t0', '_t25', '_t50', '_t75', '_t100'))}
-    if known_models:
+    if model_counts:
         click.echo("\n🔬 By model (for build-model-templates):\n")
-        for mdl in sorted(known_models.keys()):
-            cnt = known_models[mdl]
+        for mdl in sorted(model_counts.keys()):
+            cnt = model_counts[mdl]
             flag = "" if cnt >= 3 else click.style("  ⚠️ <3 samples", fg='yellow')
             click.echo(f"  {mdl:28s} {cnt:3d}{flag}")
 
@@ -704,8 +713,12 @@ def info():
     
     click.echo(f"\n📋 Families: {', '.join(sorted(config.MODEL_FAMILIES.keys()))}")
     
-    store = FingerprintStore(str(config.FINGERPRINTS_DIR))
-    counts = store.count_by_family()
+    # Count across training/ and the legacy top-level dir (glob is non-recursive).
+    counts = {}
+    for directory in [config.TRAINING_DIR, config.FINGERPRINTS_DIR]:
+        store = FingerprintStore(str(directory))
+        for fam, cnt in store.count_by_family().items():
+            counts[fam] = counts.get(fam, 0) + cnt
     classifier_path = config.MODEL_DIR / "classifier_model.joblib"
     
     click.echo(f"\n📊 Status:")

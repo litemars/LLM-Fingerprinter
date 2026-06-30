@@ -76,7 +76,7 @@ class DeepSeekClient(BaseClient):
             logger.error(f"Error checking API connectivity: {e}")
             return False
 
-    def generate(self, model, prompt, system=None, temperature=0.7, max_tokens=512):
+    def generate(self, model, prompt, temperature=0.7, max_tokens=512, system=None):
         start = time.time()
 
         try:
@@ -87,7 +87,9 @@ class DeepSeekClient(BaseClient):
 
             response = self.client.chat.completions.create(
                 model=model,
-                messages=messages
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
 
             elapsed = time.time() - start

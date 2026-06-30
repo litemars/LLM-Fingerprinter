@@ -6,6 +6,10 @@ from llm_fingerprinter.base_client import BaseClient, ClientError
 
 logger = logging.getLogger(__name__)
 
+# Headroom added to max_completion_tokens for reasoning models, whose hidden
+# reasoning tokens share the budget with the visible answer.
+REASONING_TOKEN_BUFFER = 4096
+
 
 class OpenAIError(ClientError):
     """Base exception for OpenAI client errors."""
@@ -88,6 +92,15 @@ class OpenAIClient(BaseClient):
             logger.error(f"Error checking API connectivity: {e}")
             return False
 
+    @staticmethod
+    def _is_reasoning_model(model: Optional[str]) -> bool:
+        """Reasoning models (o1/o3/o4, gpt-5) reject `temperature` and need
+        `max_completion_tokens` instead of `max_tokens`."""
+        if not model:
+            return False
+        m = model.lower().lstrip()
+        return m.startswith(("o1", "o3", "o4")) or m.startswith("gpt-5")
+
     def generate(self, model, prompt, temperature=0.7, max_tokens=512, system=None):
         start = time.time()
 
@@ -97,10 +110,39 @@ class OpenAIClient(BaseClient):
                 messages.append({"role": "system", "content": system})
             messages.append({"role": "user", "content": prompt})
 
-            response = self.client.chat.completions.create(
-                model=model,
-                messages=messages
-            )
+            if self._is_reasoning_model(model):
+                params = {
+                    "model": model,
+                    "messages": messages,
+                    "max_completion_tokens": max_tokens + REASONING_TOKEN_BUFFER,
+                    # temperature omitted — reasoning models only allow the default
+                }
+            else:
+                params = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
+
+            try:
+                response = self.client.chat.completions.create(**params)
+            except self._openai_module.BadRequestError as e:
+                # Retry once dropping temperature for endpoints/models that reject it.
+                msg = str(e).lower()
+                if any(k in msg for k in ("temperature", "max_tokens", "max_completion_tokens")):
+                    logger.warning(f"{model}: retrying without unsupported sampling "
+                                   f"params ({e})")
+                    retry_budget = max_tokens + (
+                        REASONING_TOKEN_BUFFER if self._is_reasoning_model(model) else 0
+                    )
+                    response = self.client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_completion_tokens=retry_budget,
+                    )
+                else:
+                    raise
 
             elapsed = time.time() - start
 

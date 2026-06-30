@@ -44,6 +44,14 @@ def _cosine_distances(query: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     return 1.0 - np.clip(sims, -1.0, 1.0)
 
 
+def _fit_standardizer(stacked: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-feature (mean, std) over a (N, D) stack. Constant features get std=1."""
+    mean = stacked.mean(axis=0)
+    std = stacked.std(axis=0)
+    std = np.where(std > 1e-8, std, 1.0)
+    return mean.astype(np.float32), std.astype(np.float32)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TemplateClassifier
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,11 +71,20 @@ class TemplateClassifier:
         self.templates: dict[str, np.ndarray] = {}   # family -> mean vector
         self.ood_ratio_threshold = ood_ratio_threshold
         self._ood_radius: float | None = None         # calibrated from training
+        # Per-feature standardizer, fitted in build().
+        self._feat_mean: np.ndarray | None = None
+        self._feat_std: np.ndarray | None = None
         self.is_built = False
-        # Optional model_name -> family mapping (populated by build-model-templates).
-        # When present, classify() returns an inferred_family so that identify()
-        # can recover the correct family even when the ensemble is OOD.
+        # model_name -> family, set by build-model-templates for OOD family recovery.
         self.model_families: dict[str, str] = {}
+
+    # ── Internal: feature standardization ──────────────────────────────────────
+
+    def _apply_scaler(self, X: np.ndarray) -> np.ndarray:
+        """Standardize X (D,) or (N, D); no-op if no scaler was fitted."""
+        if self._feat_mean is None or self._feat_std is None:
+            return X
+        return ((X - self._feat_mean) / self._feat_std).astype(np.float32)
 
     # ── Build / update ───────────────────────────────────────────────────────
 
@@ -95,12 +112,21 @@ class TemplateClassifier:
         self.model_families = model_families or {}
         intra_distances: list[float] = []
 
+        # Standardize first — otherwise cosine distance is dominated by the
+        # large-magnitude linguistic counts and embeddings contribute ~0%.
+        all_vecs = [np.asarray(v, dtype=np.float32)
+                    for vs in simulation_data.values() for v in vs]
+        if not all_vecs:
+            logger.error("No vectors in simulation data — templates not built")
+            return False
+        self._feat_mean, self._feat_std = _fit_standardizer(np.stack(all_vecs))
+
         for family, vectors in simulation_data.items():
             if not vectors:
                 logger.warning(f"Skipping '{family}': no vectors")
                 continue
 
-            vecs = np.array(vectors, dtype=np.float32)
+            vecs = self._apply_scaler(np.array(vectors, dtype=np.float32))
             mean_vec = vecs.mean(axis=0)
             self.templates[family] = mean_vec
 
@@ -147,7 +173,13 @@ class TemplateClassifier:
                 f"recommend >= 3 for a reliable template"
             )
 
-        vecs = np.array(vectors, dtype=np.float32)
+        if self._feat_mean is None:
+            logger.warning(
+                f"Adding '{family_name}' to a store with no fitted standardizer — "
+                f"template stored in raw feature space. Run 'build-templates' to "
+                f"refit the standardizer across all families for best accuracy."
+            )
+        vecs = self._apply_scaler(np.array(vectors, dtype=np.float32))
         self.templates[family_name] = vecs.mean(axis=0)
         self.is_built = True
         logger.info(
@@ -162,7 +194,7 @@ class TemplateClassifier:
         """Classify a fingerprint by nearest template.
 
         Args:
-            fingerprint: Raw 1206-dim feature vector (same as ensemble input)
+            fingerprint: Raw 1206-dim feature vector (standardized internally).
             top_k:       Number of ranked candidates to return
 
         Returns:
@@ -179,7 +211,7 @@ class TemplateClassifier:
                 "Templates not built. Call build() first or load() from disk."
             )
 
-        fp = fingerprint.astype(np.float32).ravel()
+        fp = self._apply_scaler(fingerprint.astype(np.float32).ravel())
         families = list(self.templates.keys())
         template_matrix = np.stack([self.templates[f] for f in families])
 
@@ -240,6 +272,8 @@ class TemplateClassifier:
                     "ood_radius": self._ood_radius,
                     "is_built": self.is_built,
                     "model_families": self.model_families,
+                    "feat_mean": self._feat_mean,
+                    "feat_std": self._feat_std,
                 },
                 filepath,
             )
@@ -260,6 +294,8 @@ class TemplateClassifier:
             self._ood_radius = data.get("ood_radius")
             self.is_built = data.get("is_built", True)
             self.model_families = data.get("model_families", {})
+            self._feat_mean = data.get("feat_mean")
+            self._feat_std = data.get("feat_std")
             return True
         except FileNotFoundError:
             logger.debug(f"Templates file not found: {filepath}")
