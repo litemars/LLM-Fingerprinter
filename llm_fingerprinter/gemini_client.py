@@ -1,6 +1,8 @@
 import logging
 import time
 from typing import List, Optional
+from tenacity import (retry, stop_after_attempt, wait_chain, wait_fixed,
+                      retry_if_exception_type, before_sleep_log)
 
 from llm_fingerprinter.base_client import BaseClient, ClientError
 
@@ -24,6 +26,11 @@ class GeminiGenerationError(GeminiError):
 
 class GeminiAuthError(GeminiError):
     """Raised when authentication fails."""
+    pass
+
+
+class GeminiRateLimitError(GeminiGenerationError):
+    """Raised on 429 / quota errors — retried with exponential backoff."""
     pass
 
 
@@ -68,6 +75,13 @@ class GeminiClient(BaseClient):
                 logger.error(f"Error checking Gemini API connectivity: {e}")
             return False
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_chain(wait_fixed(5), wait_fixed(60)),
+        retry=retry_if_exception_type(GeminiRateLimitError),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
     def generate(self, model, prompt, temperature=0.7,
                  max_tokens=512, system=None):
         start = time.time()
@@ -115,8 +129,9 @@ class GeminiClient(BaseClient):
                 raise GeminiAuthError("Access forbidden - check API key permissions")
             elif "404" in error_str or "not found" in error_str:
                 raise GeminiGenerationError(f"Model '{model}' not found")
-            elif "429" in error_str or "rate limit" in error_str or "quota" in error_str:
-                raise GeminiGenerationError("Rate limit exceeded - please wait and retry")
+            elif ("429" in error_str or "rate limit" in error_str
+                  or "quota" in error_str or "resource_exhausted" in error_str):
+                raise GeminiRateLimitError("Rate limit exceeded - backing off and retrying")
             elif "timeout" in error_str:
                 raise GeminiConnectionError(f"Request timeout after {self.timeout}s")
             else:
@@ -132,8 +147,14 @@ class GeminiClient(BaseClient):
                 if name.startswith("models/"):
                     name = name[7:]
 
-                supported_methods = getattr(model, 'supported_generation_methods', [])
-                if 'generateContent' in supported_methods:
+                # New google-genai SDK exposes 'supported_actions'; the legacy
+                # google-generativeai SDK used 'supported_generation_methods'.
+                supported = (getattr(model, 'supported_actions', None)
+                             or getattr(model, 'supported_generation_methods', None)
+                             or [])
+                # Keep generateContent models; if the field is empty, keep it
+                # anyway rather than silently dropping everything.
+                if not supported or 'generateContent' in supported:
                     models.append(name)
 
             logger.info(f"Found {len(models)} Gemini models")
@@ -162,7 +183,8 @@ class GeminiClient(BaseClient):
                 "description": getattr(model_obj, 'description', None),
                 "input_token_limit": getattr(model_obj, 'input_token_limit', None),
                 "output_token_limit": getattr(model_obj, 'output_token_limit', None),
-                "supported_generation_methods": getattr(model_obj, 'supported_generation_methods', []),
+                "supported_actions": (getattr(model_obj, 'supported_actions', None)
+                                      or getattr(model_obj, 'supported_generation_methods', [])),
             }
 
         except Exception as e:
