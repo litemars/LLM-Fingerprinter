@@ -1,7 +1,7 @@
 """LLM Fingerprinter - Black-box LLM model identification system.
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 __author__ = "litemars"
 
 from llm_fingerprinter.fingerprinter import LLMFingerprinter
