@@ -16,6 +16,7 @@ venv/
 .idea/
 .vscode/
 test.sh
+upload.sh
 ollama-api-key
 claude-api-key
 google-api-key
