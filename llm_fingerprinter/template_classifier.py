@@ -5,7 +5,7 @@ Unlike the ensemble (closed-set, requires retraining for new families), this:
   - Classifies by cosine distance to the nearest per-family mean fingerprint
   - Adds new families from just a few fingerprint samples (no retraining needed)
   - Provides principled OOD detection via distance ratio + calibrated radius
-  - Runs alongside the ensemble as a second opinion during identify
+  - Controls family identification and unknown rejection during identify
 
 Workflow:
   1. Build templates from training data:      tc = TemplateClassifier()
@@ -24,6 +24,8 @@ Workflow:
 import logging
 import numpy as np
 import joblib
+
+from llm_fingerprinter import config
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +86,17 @@ class TemplateClassifier:
         """Standardize X (D,) or (N, D); no-op if no scaler was fitted."""
         if self._feat_mean is None or self._feat_std is None:
             return X
-        return ((X - self._feat_mean) / self._feat_std).astype(np.float32)
+        if (X.ndim not in (1, 2) or self._feat_mean.ndim != 1
+                or X.shape[-1] != len(self._feat_mean)
+                or self._feat_std.shape != self._feat_mean.shape
+                or not np.isfinite(self._feat_mean).all()
+                or not np.isfinite(self._feat_std).all()
+                or np.any(self._feat_std <= 0)):
+            raise ValueError("Fingerprint and template scaler geometry must match exactly")
+        transformed = ((X - self._feat_mean) / self._feat_std).astype(np.float32)
+        if not np.isfinite(transformed).all():
+            raise ValueError("Nonfinite features after template standardization")
+        return transformed
 
     # ── Build / update ───────────────────────────────────────────────────────
 
@@ -108,6 +120,19 @@ class TemplateClassifier:
             logger.error("No simulation data provided")
             return False
 
+        populated = {k: v for k, v in simulation_data.items() if len(v) > 0}
+
+        if len(populated) < 2:
+            logger.error(
+                f"Need at least 2 classes to build templates, got "
+                f"{len(populated)} ({sorted(populated) or 'none'}). A one-class "
+                f"store yields a zero-vector template and meaningless distances. "
+                f"Collect fingerprints for another family/model first."
+            )
+            return False
+
+        self.is_built = False
+        self._ood_radius = None
         self.templates = {}
         self.model_families = model_families or {}
         intra_distances: list[float] = []
@@ -119,7 +144,15 @@ class TemplateClassifier:
         if not all_vecs:
             logger.error("No vectors in simulation data — templates not built")
             return False
-        self._feat_mean, self._feat_std = _fit_standardizer(np.stack(all_vecs))
+        stacked = np.stack(all_vecs)
+        if stacked.ndim != 2 or not np.isfinite(stacked).all():
+            logger.error("Template training requires finite, one-dimensional vectors")
+            return False
+        self._feat_mean, self._feat_std = _fit_standardizer(stacked)
+        # Reference scale for the degeneracy check below.
+        typical_norm = float(np.median(
+            np.linalg.norm(self._apply_scaler(np.stack(all_vecs)), axis=1)
+        ))
 
         for family, vectors in simulation_data.items():
             if not vectors:
@@ -137,6 +170,21 @@ class TemplateClassifier:
 
         if not self.templates:
             logger.error("No valid families — templates not built")
+            return False
+
+        # Guard against templates that collapsed to (near) zero in standardized
+        # space — cosine distance to such a vector carries no signal.
+        degenerate = [
+            f for f, t in self.templates.items()
+            if float(np.linalg.norm(t)) < 1e-3 * max(typical_norm, 1e-9)
+        ]
+        if degenerate:
+            logger.error(
+                f"Templates collapsed to ~zero in standardized space: {degenerate}. "
+                f"Distances would be numerical noise, so the store was not built. "
+                f"This usually means the classes are not actually distinct."
+            )
+            self.templates = {}
             return False
 
         # OOD radius: 2× the 95th-percentile intra-class distance
@@ -180,7 +228,27 @@ class TemplateClassifier:
                 f"refit the standardizer across all families for best accuracy."
             )
         vecs = self._apply_scaler(np.array(vectors, dtype=np.float32))
-        self.templates[family_name] = vecs.mean(axis=0)
+        if vecs.ndim != 2 or not np.isfinite(vecs).all():
+            logger.error("Cannot add non-finite or malformed template vectors")
+            return False
+        mean_vec = vecs.mean(axis=0)
+        typical_norm = float(np.median(np.linalg.norm(vecs, axis=1)))
+        if float(np.linalg.norm(mean_vec)) < 1e-3 * max(typical_norm, 1e-9):
+            logger.error("Cannot add '%s': template centroid has no usable signal", family_name)
+            return False
+        self.templates[family_name] = mean_vec
+
+        # Fold this family's spread into the OOD radius. Without this the radius
+        # stays calibrated on whatever classes build() saw, so a newly added
+        # family sits outside it and every probe of it reads as OOD.
+        if len(vecs) > 1:
+            new_radius = float(np.percentile(
+                _cosine_distances(mean_vec, vecs), 95)) * 2.0
+            self._ood_radius = (new_radius if self._ood_radius is None
+                                else max(self._ood_radius, new_radius))
+            logger.info(f"OOD radius after add_family: {self._ood_radius:.4f} "
+                        f"(re-run 'build-templates' to recalibrate across all families)")
+
         self.is_built = True
         logger.info(
             f"Added template for '{family_name}' from {len(vectors)} vectors "
@@ -211,9 +279,17 @@ class TemplateClassifier:
                 "Templates not built. Call build() first or load() from disk."
             )
 
-        fp = self._apply_scaler(fingerprint.astype(np.float32).ravel())
+        if not isinstance(top_k, (int, np.integer)) or top_k < 1:
+            raise ValueError("top_k must be a positive integer")
+        fingerprint = np.asarray(fingerprint, dtype=np.float32)
+        if fingerprint.ndim != 1 or not np.isfinite(fingerprint).all():
+            raise ValueError("Fingerprint must be a finite, one-dimensional vector")
         families = list(self.templates.keys())
         template_matrix = np.stack([self.templates[f] for f in families])
+        if (template_matrix.ndim != 2 or not np.isfinite(template_matrix).all()
+                or fingerprint.shape != (template_matrix.shape[1],)):
+            raise ValueError("Fingerprint width must match finite template vectors exactly")
+        fp = self._apply_scaler(fingerprint)
 
         dists = _cosine_distances(fp, template_matrix)
         order = np.argsort(dists)
@@ -224,12 +300,13 @@ class TemplateClassifier:
         ]
 
         best = ranked[0]
-        second = ranked[1] if len(ranked) > 1 else None
+        # Rejection must not depend on the number of displayed candidates.
+        second_distance = float(dists[order[1]]) if len(order) > 1 else None
 
         # OOD signal 1: ratio test — best and second-best are too similar
         ratio_ood = (
-            second is not None
-            and (best["distance"] / (second["distance"] + 1e-9))
+            second_distance is not None
+            and (best["distance"] / (second_distance + 1e-9))
             > self.ood_ratio_threshold
         )
         # OOD signal 2: absolute distance exceeds calibrated radius
@@ -238,8 +315,23 @@ class TemplateClassifier:
             and best["distance"] > self._ood_radius
         )
 
-        is_ood = ratio_ood or radius_ood
-        ood_reason = "ratio" if ratio_ood else ("radius" if radius_ood else None)
+        # A store with a single template cannot discriminate at all: the ratio
+        # test has no runner-up to compare against and the radius was calibrated
+        # from that same lone class, so both signals are inert. Report unknown
+        # rather than a confident nearest match.
+        lone_template = len(self.templates) < 2
+        uncalibrated = self._ood_radius is None or not np.isfinite(self._ood_radius)
+        no_signal = np.linalg.norm(fp) <= 1e-12
+
+        is_ood = ratio_ood or radius_ood or lone_template or uncalibrated or no_signal
+        if lone_template:
+            ood_reason = "insufficient_templates"
+        elif uncalibrated:
+            ood_reason = "uncalibrated_radius"
+        elif no_signal:
+            ood_reason = "no_signal"
+        else:
+            ood_reason = "ratio" if ratio_ood else ("radius" if radius_ood else None)
 
         # Confidence: invert cosine distance (0 = perfect match → 1.0 confidence)
         confidence = float(max(0.0, 1.0 - best["distance"] / 2.0))
@@ -286,7 +378,13 @@ class TemplateClassifier:
             return False
 
     def load(self, filepath: str) -> bool:
-        """Load templates from disk."""
+        """Load templates from disk.
+
+        Raises:
+            config.UntrustedArtifactError: if `filepath` is outside every
+                trusted root (joblib.load unpickles, which executes code).
+        """
+        filepath = config.ensure_trusted_artifact(filepath)
         try:
             data = joblib.load(filepath)
             self.templates = data["templates"]
@@ -297,6 +395,8 @@ class TemplateClassifier:
             self._feat_mean = data.get("feat_mean")
             self._feat_std = data.get("feat_std")
             return True
+        except config.UntrustedArtifactError:
+            raise
         except FileNotFoundError:
             logger.debug(f"Templates file not found: {filepath}")
             return False

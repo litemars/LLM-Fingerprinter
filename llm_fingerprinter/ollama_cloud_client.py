@@ -24,6 +24,12 @@ class OllamaCloudGenerationError(OllamaCloudError):
     pass
 
 
+class OllamaCloudTransientError(OllamaCloudError):
+    """Raised when the API returned a model-load placeholder rather than an
+    answer. Retried by generate()."""
+    pass
+
+
 class OllamaCloudAuthError(OllamaCloudError):
     """Raised when authentication fails."""
     pass
@@ -85,7 +91,14 @@ class OllamaCloudClient(BaseClient):
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((requests.Timeout, requests.ConnectionError))
+        # The domain types must be listed explicitly: the handlers below re-raise
+        # requests.ConnectionError as OllamaCloudConnectionError, so a predicate
+        # naming only requests.ConnectionError never matched.
+        retry=retry_if_exception_type(
+            (requests.Timeout, requests.ConnectionError,
+             OllamaCloudConnectionError, OllamaCloudTransientError)
+        ),
+        reraise=True,
     )
     def generate(self, model, prompt, temperature=0.7, max_tokens=512, system=None):
         url = f"{self.endpoint}/api/generate"
@@ -111,6 +124,16 @@ class OllamaCloudClient(BaseClient):
             if response.status_code == 200:
                 result = response.json()
                 text = result.get("response", "").strip()
+
+                if not text:
+                    if result.get("done_reason") == "load":
+                        raise OllamaCloudTransientError(
+                            f"Model '{model}' was still loading (no answer yet)"
+                        )
+                    raise OllamaCloudGenerationError(
+                        f"Model '{model}' returned an empty response "
+                        f"(done_reason={result.get('done_reason')!r})"
+                    )
 
                 eval_count = result.get("eval_count", 0)
                 eval_duration = result.get("eval_duration", 0)

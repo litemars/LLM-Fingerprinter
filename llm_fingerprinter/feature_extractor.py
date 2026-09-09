@@ -2,6 +2,12 @@ import numpy as np
 import logging
 import re
 
+from llm_fingerprinter.feature_validation import (
+    FeatureValidationError,
+    validate_embedding,
+    validate_response_features,
+)
+
 logger = logging.getLogger(__name__)
 
 def _setup_nltk():
@@ -137,13 +143,23 @@ class FeatureExtractor:
 
         Returns:
             List of np.ndarray, one per pair, in the same order.
-            Zero-vectors are returned for empty/failed responses.
+            Empty responses retain zero-vector placeholders for compatibility.
+
+        Raises:
+            FeatureValidationError: a nonempty response cannot be embedded or
+                the encoder returns malformed, nonfinite or all-zero features.
         """
         if not prompt_response_pairs:
             return []
 
         total_dim = self.embedding_dim + self.LINGUISTIC_DIM + self.BEHAVIORAL_DIM
-        responses = [r for _, r in prompt_response_pairs]
+        nonempty_pairs = [(index, prompt, response)
+                          for index, (prompt, response) in enumerate(prompt_response_pairs)
+                          if response and response.strip()]
+        results = [np.zeros(total_dim, dtype=np.float32) for _ in prompt_response_pairs]
+        if not nonempty_pairs:
+            return results
+        responses = [response for _, _, response in nonempty_pairs]
 
         # --- Batch encode all responses in one forward pass ---
         try:
@@ -152,21 +168,32 @@ class FeatureExtractor:
                 batch_size=32,
                 convert_to_numpy=True,
                 show_progress_bar=False,
-            ).astype(np.float32)
+            )
         except Exception as e:
             logger.error(f"Batch embedding failed, falling back per-response: {e}")
             embeddings = np.stack([
                 self._embedding_features(r) for r in responses
             ])
 
-        results = []
-        for (prompt, response), embedding in zip(prompt_response_pairs, embeddings):
-            if not response or not response.strip():
-                results.append(np.zeros(total_dim, dtype=np.float32))
-                continue
+        try:
+            embeddings = np.asarray(embeddings, dtype=np.float32)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise FeatureValidationError("Batch encoder returned nonnumeric embeddings") from exc
+        if embeddings.shape != (len(responses), self.embedding_dim):
+            raise FeatureValidationError(
+                f"Batch encoder returned shape {embeddings.shape}; "
+                f"expected ({len(responses)}, {self.embedding_dim})"
+            )
+        for (index, prompt, response), embedding in zip(nonempty_pairs, embeddings):
+            validate_embedding(embedding, self.embedding_dim)
             ling = self._linguistic_features(response)
             beh  = self._behavioral_features(prompt, response)
-            results.append(np.concatenate([embedding, ling, beh]))
+            results[index] = validate_response_features(
+                np.concatenate([embedding, ling, beh]),
+                embedding_dim=self.embedding_dim,
+                linguistic_dim=self.LINGUISTIC_DIM,
+                behavioral_dim=self.BEHAVIORAL_DIM,
+            )
 
         return results
 
@@ -187,7 +214,10 @@ class FeatureExtractor:
             behavioral_features
         ])
         
-        return all_features
+        return validate_response_features(
+            all_features, embedding_dim=self.embedding_dim,
+            linguistic_dim=self.LINGUISTIC_DIM, behavioral_dim=self.BEHAVIORAL_DIM,
+        )
     
     def get_feature_dim(self):
 
@@ -196,10 +226,9 @@ class FeatureExtractor:
     def _embedding_features(self, response: str):
         try:
             embedding = self.embedding_model.encode(response, convert_to_numpy=True)
-            return embedding.astype(np.float32)
         except Exception as e:
-            logger.error(f"Embedding extraction failed: {e}")
-            return np.zeros(self.embedding_dim, dtype=np.float32)
+            raise FeatureValidationError(f"Embedding extraction failed: {e}") from e
+        return validate_embedding(embedding, self.embedding_dim)
     
     def _linguistic_features(self, response: str):
         """

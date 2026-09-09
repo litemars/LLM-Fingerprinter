@@ -1,6 +1,8 @@
 import os
 import shutil
+import sys
 from pathlib import Path
+from typing import List, Optional
 
 # Package directory (where the code lives)
 PACKAGE_DIR = Path(__file__).parent
@@ -27,27 +29,60 @@ MODEL_FAMILIES = {
 }
 
 
-def _find_project_root() -> Path:
-    """Walk up from CWD to find the project root (marked by setup.py or .git)."""
-    for path in [Path.cwd(), *Path.cwd().parents]:
-        if (path / "setup.py").exists() or (path / ".git").exists():
-            return path
-    return Path.cwd()
+class UntrustedArtifactError(Exception):
+    """Raised when a joblib/pickle artifact lies outside every trusted root.
 
-
-def _get_data_dir() -> Path:
-    """Runtime data dir: LLM_FINGERPRINTER_DATA, else the project root."""
-    env_dir = os.environ.get("LLM_FINGERPRINTER_DATA")
-    if env_dir:
-        return Path(env_dir)
-
-    return _find_project_root()
+    Loading a joblib file unpickles it, which executes arbitrary code from
+    whoever wrote the file. Artifact paths must therefore never be derived
+    from ambient state such as the process working directory.
+    """
+    pass
 
 
 def _running_from_source() -> bool:
     """True when imported from a source checkout, not an installed package."""
     parts = set(PACKAGE_DIR.parts)
     return "site-packages" not in parts and "dist-packages" not in parts
+
+
+def _source_checkout_root() -> Optional[Path]:
+    """Root of the source checkout this package lives in, or None.
+
+    Derived from the *package's own* location — deliberately NOT from the
+    process working directory. Walking up from CWD used to mean that running
+    the CLI anywhere inside an unrelated repository silently redirected model
+    loading into that repository, handing code execution to whoever wrote it.
+    """
+    if not _running_from_source():
+        return None
+    root = PACKAGE_DIR.parent
+    for marker in ("setup.py", "pyproject.toml", ".git"):
+        if (root / marker).exists():
+            return root
+    return None
+
+
+def _user_data_dir() -> Path:
+    """Per-user data directory, following platform conventions."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "llm-fingerprinter"
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "llm-fingerprinter"
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(base) / "llm-fingerprinter"
+
+
+def _get_data_dir() -> Path:
+    env_dir = os.environ.get("LLM_FINGERPRINTER_DATA")
+    if env_dir:
+        return Path(env_dir)
+
+    src_root = _source_checkout_root()
+    if src_root is not None:
+        return src_root
+
+    return _user_data_dir()
 
 
 def _dir_writable(path: Path) -> bool:
@@ -85,6 +120,79 @@ LOGS_DIR = BASE_DIR / "logs"
 # MODEL_DIR when run from source; for installed packages the bootstrap below seeds
 # the separate runtime MODEL_DIR from it.
 BUNDLED_MODEL_DIR = PACKAGE_DIR / "model"
+
+
+def _trusted_artifact_roots() -> List[Path]:
+    """Directories a joblib artifact may be loaded from.
+
+    Only locations the operator chose: what ships inside the package, the
+    per-user data directory, an explicit LLM_FINGERPRINTER_* override, and the
+    source checkout when running from one. Ambient locations (the working
+    directory, or any repository above it) are deliberately absent.
+    """
+    roots = [PACKAGE_DIR, _user_data_dir()]
+
+    for env_var in ("LLM_FINGERPRINTER_MODEL", "LLM_FINGERPRINTER_DATA"):
+        env_dir = os.environ.get(env_var)
+        if env_dir:
+            roots.append(Path(env_dir))
+
+    src_root = _source_checkout_root()
+    if src_root is not None:
+        roots.append(src_root)
+
+    return roots
+
+
+def is_trusted_artifact_path(path) -> bool:
+    """Whether `path` sits under a trusted artifact root."""
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        return False
+
+    for root in _trusted_artifact_roots():
+        try:
+            resolved.relative_to(root.resolve())
+            return True
+        except (ValueError, OSError):
+            continue
+    return False
+
+
+def ensure_trusted_artifact(path) -> Path:
+    """Return `path` if it is safe to unpickle, else raise UntrustedArtifactError.
+
+    Call this before every joblib.load of a model artifact.
+    """
+    resolved = Path(path)
+    if not is_trusted_artifact_path(resolved):
+        raise UntrustedArtifactError(
+            f"Refusing to load model artifact from an untrusted location: {resolved}\n"
+            f"Artifacts are unpickled, which executes code from whoever wrote the file.\n"
+            f"Trusted locations: the installed package, {_user_data_dir()}, or a path "
+            f"you set explicitly via LLM_FINGERPRINTER_MODEL / LLM_FINGERPRINTER_DATA."
+        )
+    return resolved
+
+
+def legacy_cwd_data_dir() -> Optional[Path]:
+    """A pre-0.4.2 CWD-derived data directory holding fingerprints, if one exists.
+
+    Earlier versions resolved BASE_DIR by walking up from the working directory
+    to the nearest setup.py/.git. Surfaced so the CLI can point users at data
+    left behind by that behaviour instead of silently appearing to lose it.
+    """
+    for path in [Path.cwd(), *Path.cwd().parents]:
+        if (path / "setup.py").exists() or (path / ".git").exists():
+            if path.resolve() == BASE_DIR.resolve():
+                return None
+            legacy_fp = path / "fingerprints"
+            if legacy_fp.is_dir() and any(legacy_fp.rglob("*.json")):
+                return path
+            return None
+    return None
+
 
 # Ensure directories exist
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -127,6 +235,8 @@ PCA_DIM = 64
 # OOD detection thresholds
 OOD_CONFIDENCE_THRESHOLD = 0.3
 OOD_DISAGREEMENT_THRESHOLD = 0.15
+MIN_LAYER_COVERAGE = 0.6
+TRAINING_MIN_LAYER_COVERAGE = 0.9
 
 # Prompt suite
 PROMPT_REPEATS = 1

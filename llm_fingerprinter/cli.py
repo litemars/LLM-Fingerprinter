@@ -119,78 +119,47 @@ def print_report(result: dict):
     tc_result  = result.get('template_result')
     model_est  = result.get('model_estimate')
 
-    # ── Family ────────────────────────────────────────────────────────────────
-    family_source = result.get('family_source')
-    if is_ood and family_source == 'model_template':
-        # Family was recovered from a high-confidence model-template match —
-        # show it prominently instead of the confusing OOD ensemble output.
-        mt_conf = result.get('model_estimate', {}).get('confidence', 0.0)
-        click.echo(f"\n  Family:     {click.style(family.upper(), fg='green', bold=True)}"
-                   f"  ({mt_conf*100:.1f}% via model template)")
-        click.echo(click.style(
-            "  ⚠️  Note: ensemble was uncertain — family inferred from model match",
-            fg='yellow'))
-    elif is_ood:
-        click.echo(click.style(f"\n  ⚠️  OUT-OF-DISTRIBUTION DETECTED", fg='yellow', bold=True))
-        predicted = result.get('predicted_family', '?')
-        click.echo(f"  Best guess: {click.style(predicted.upper(), fg='yellow')}")
-        click.echo(f"  Confidence: {click.style(f'{confidence*100:.1f}%', fg='red')}")
-        ood_details = result.get('ood_details', {})
-        click.echo(f"  Classifier agreement: {ood_details.get('agreement_ratio', 0)*100:.0f}%")
-        click.echo(click.style("  Model may not match any known family", fg='yellow'))
+    if is_ood:
+        click.echo(click.style("\n  Family:     UNKNOWN", fg='yellow', bold=True))
+        click.echo(f"  Nearest family: {result.get('predicted_family', 'unknown')}")
+        reasons = {
+            'partial_fingerprint': 'Only part of the suite was collected; run the full suite for identification.',
+            'family_templates_unavailable': "Family templates are unavailable; run 'train' or 'build-templates'.",
+            'ratio': 'The nearest families are too similar to distinguish.',
+            'radius': 'The fingerprint lies outside the known-family distance threshold.',
+            'uncalibrated_radius': 'There are too few observations to calibrate unknown detection.',
+            'insufficient_templates': 'At least two family templates are required.',
+            'no_signal': 'The fingerprint has no usable directional signal.',
+        }
+        reason = result.get('decision_reason', 'unknown')
+        click.echo(f"  Reason:     {reasons.get(reason, reason)}")
     else:
-        conf_color = 'green' if confidence > 0.7 else 'yellow' if confidence > 0.4 else 'red'
-        click.echo(f"\n  Family:     {click.style(family.upper(), fg=conf_color, bold=True)}"
-                   f"  ({confidence*100:.1f}%)")
+        click.echo(f"\n  Family:     {click.style(family.upper(), fg='green', bold=True)}")
+    if result.get('confidence_kind') == 'cosine_similarity':
+        click.echo(f"  Similarity: {confidence:.3f} (template score, not a probability)")
 
-    # ── Ensemble probabilities ────────────────────────────────────────────────
     all_probs = result.get('all_probabilities', {})
     if all_probs:
-        click.echo("\n  Probabilities:")
+        click.echo("\n  Ensemble probabilities (supporting evidence):")
         for fam, prob in sorted(all_probs.items(), key=lambda x: -x[1])[:5]:
             bar = "█" * int(prob * 25)
             click.echo(f"    {fam:12s} {prob*100:5.1f}% {bar}")
+    if result.get('ensemble_disagrees'):
+        click.echo("  Ensemble and templates disagree; the final decision uses family templates.")
 
-    # ── Model estimate (specific version) ─────────────────────────────────────
     if model_est:
-        best_model = model_est.get('predicted_model', '?')
-        me_conf    = model_est.get('confidence', 0.0)
-        me_ood     = model_est.get('is_ood', False)
-        me_color   = 'green' if me_conf > 0.6 else 'yellow'
-        # "ambiguous" means two candidate models scored very close — best guess
-        # is shown but treat it with lower trust
-        me_note    = click.style("  (ambiguous — two models too similar to distinguish)",
-                                 fg='yellow') if me_ood else ""
-        click.echo(f"\n  Model:      {click.style(best_model, fg=me_color, bold=True)}"
-                   f"  ({me_conf*100:.1f}%){me_note}")
-        click.echo("  Other candidates:")
+        if model_est.get('is_ood', True):
+            click.echo("\n  Model:      unknown")
+            click.echo(f"  Nearest model: {model_est.get('predicted_model', '?')} (unconfirmed)")
+        else:
+            click.echo(f"\n  Model:      {model_est['predicted_model']}")
+        click.echo(f"  Similarity: {model_est.get('confidence', 0):.3f}")
         for rr in model_est.get('ranked', [])[1:4]:
             click.echo(f"    {rr['family']:26s} dist={rr['distance']:.4f}")
-
-    # ── Note when template estimates were skipped (early-stopped) ──────────────
     elif result.get('templates_skipped_reason') == 'early_stopped':
-        click.echo(click.style(
-            "\n  ℹ️  Model-level estimate skipped — early-stopped fingerprint is"
-            " partial and not comparable to the full-fingerprint templates."
-            "\n     Run with --early-stop 0 for a model-level estimate.",
-            fg='cyan'))
-
-    # ── Template warning — ONLY shown when it adds new information ─────────────
-    # (disagrees with ensemble, or flags the model as unknown/OOD)
-    # In the normal case where template agrees, it stays silent.
-    if tc_result:
-        tc_predicted = tc_result.get('predicted_family', '').lower()
-        tc_ood       = tc_result.get('is_ood', False)
-        disagrees    = not is_ood and tc_predicted and tc_predicted != family.lower()
-        if tc_ood:
-            click.echo(click.style(
-                "\n  ⚠️  Warning: model may not belong to any known family",
-                fg='yellow'))
-        elif disagrees:
-            click.echo(click.style(
-                f"\n  ⚠️  Warning: template classifier disagrees"
-                f" — nearest family is {tc_predicted.upper()}",
-                fg='yellow'))
+        click.echo("\n  Template identification requires a complete fingerprint; run with --early-stop 0.")
+    if result.get('model_estimate_error'):
+        click.echo(f"\n  Model estimate unavailable: {result['model_estimate_error']}")
 
     # Query usage / early stopping summary
     q_used = result.get('queries_executed', 0)
@@ -253,12 +222,21 @@ def cli(ctx, verbose):
     ctx.obj['verbose'] = verbose
     ctx.obj['logger'] = setup_logging(verbose)
 
+    legacy = config.legacy_cwd_data_dir()
+    if legacy is not None:
+        click.echo(click.style(
+            f"ℹFingerprints found at {legacy / 'fingerprints'} are no longer read "
+            f"automatically.\n"
+            f"   The data directory is now {config.BASE_DIR}.\n"
+            f"   To use the old location: export LLM_FINGERPRINTER_DATA={legacy}",
+            fg='cyan'))
+
 
 @cli.command()
 @backend_options
 @click.option('--model', '-m', default=None, help='Model name')
-@click.option('--repeats', default=1, type=int, help='Prompt repeats (default: 1)')
-@click.option('--early-stop', default=0.0, type=float, show_default=True,
+@click.option('--repeats', default=1, type=click.IntRange(min=1), help='Prompt repeats (default: 1)')
+@click.option('--early-stop', default=0.0, type=click.FloatRange(0, 1), show_default=True,
               metavar='THRESHOLD',
               help='Stop after a layer if confidence exceeds THRESHOLD. '
                    'Skips remaining layers and saves API calls. '
@@ -305,7 +283,13 @@ def identify(ctx, backend, endpoint, api_key, request_file, model, repeats, earl
 
         classifier_path = config.MODEL_DIR / "classifier_model.joblib"
         if classifier_path.exists():
-            classifier.load(str(classifier_path))
+            if not classifier.load(str(classifier_path)):
+                click.echo(click.style(
+                    f"❌ Failed to load classifier at {classifier_path}", fg='red'))
+                click.echo("   The artifact may have been written by an incompatible "
+                           "numpy/scikit-learn version.")
+                click.echo("   See the logged error above, then re-run 'train'.")
+                sys.exit(1)
             mode = "PCA" if classifier.use_pca else "raw features"
             dims = classifier.input_dim or "?"
             click.echo(f"📂 Loaded classifier ({mode}, {dims} dims)")
@@ -314,68 +298,45 @@ def identify(ctx, backend, endpoint, api_key, request_file, model, repeats, earl
             click.echo("   Run 'simulate' then 'train' first")
             sys.exit(1)
 
+        # Load once and inject into the shared library policy before collecting.
+        family_templates = getattr(classifier, 'family_templates', None)
+        if config.TEMPLATES_PATH.exists():
+            family_templates = TemplateClassifier()
+            if not family_templates.load(str(config.TEMPLATES_PATH)):
+                raise click.ClickException("Family templates are unreadable; run 'build-templates'.")
+        if family_templates is None or not family_templates.is_built:
+            raise click.ClickException("No usable family templates; run 'train' or 'build-templates'.")
+        fingerprinter.family_templates = family_templates
+        if config.MODEL_TEMPLATES_PATH.exists():
+            model_templates = TemplateClassifier()
+            if not model_templates.load(str(config.MODEL_TEMPLATES_PATH)):
+                click.echo(click.style(
+                    "⚠️  Model templates are unreadable; continuing with family identification. "
+                    "Run 'build-model-templates' to restore version estimates.", fg='yellow'))
+            else:
+                fingerprinter.model_templates = model_templates
+
         model_display = model or "default"
         early_stop_threshold = early_stop if early_stop else None
+        if early_stop_threshold and not getattr(classifier, 'early_stop_variants', True):
+            click.echo(click.style(
+                "⚠️  This classifier was trained without early-stop variants, so it "
+                "has never seen a padded partial fingerprint.\n"
+                "   Confidence checks after each layer will be unreliable. Either drop "
+                "--early-stop,\n"
+                "   or retrain with 'train --early-stop-variants'.", fg='yellow'))
         if early_stop_threshold:
             click.echo(f"\n📊 Fingerprinting {model_display} "
                        f"(early-stop @ {early_stop_threshold*100:.0f}% confidence)...")
+            click.echo("   Partial results remain unknown until a full suite can validate the family.")
         else:
             click.echo(f"\n📊 Fingerprinting {model_display} (full suite)...")
         result = fingerprinter.identify(model, repeats=repeats,
                                         early_stop_confidence=early_stop_threshold)
 
-        fp_vec = result.get('fingerprint', {}).get('vector')
-
-        early_stopped = result.get('early_stopped', False)
-        if early_stopped:
-            result['templates_skipped_reason'] = 'early_stopped'
-            logger.info("Early-stopped fingerprint is partial — skipping template "
-                        "classifiers (they require a full fingerprint).")
-
-        # Model-level template — specific model identification
-        if not early_stopped and config.MODEL_TEMPLATES_PATH.exists() and fp_vec is not None:
-            mtc = TemplateClassifier()
-            if mtc.load(str(config.MODEL_TEMPLATES_PATH)):
-                try:
-                    mt_res = mtc.classify(fp_vec, top_k=4)
-                    result['model_estimate'] = {
-                        'predicted_model':  mt_res['predicted_family'],
-                        'confidence':       mt_res['confidence'],
-                        'distance':         mt_res['distance'],
-                        'is_ood':           mt_res['is_ood'],
-                        'ranked':           mt_res['ranked'],
-                        'inferred_family':  mt_res.get('inferred_family'),
-                    }
-                    click.echo(f"🔬 Model templates: {len(mtc.templates)} models loaded")
-
-                    # If the ensemble is OOD but the model-template match is
-                    # confident, trust its stored family label.
-                    me = result['model_estimate']
-                    if (result.get('ood_detected')
-                            and not me['is_ood']
-                            and me['confidence'] >= 0.8
-                            and me.get('inferred_family')):
-                        result['family'] = me['inferred_family']
-                        result['family_source'] = 'model_template'
-                        logger.info(
-                            f"Family recovered from model template: "
-                            f"{me['inferred_family']} "
-                            f"(confidence={me['confidence']:.3f})"
-                        )
-                except Exception as _mt_err:
-                    logger.debug(f"Model template classify failed: {_mt_err}")
-
-        # Family-level template classifier — optional open-set second opinion
-        if not early_stopped and config.TEMPLATES_PATH.exists() and fp_vec is not None:
-            tc = TemplateClassifier()
-            if tc.load(str(config.TEMPLATES_PATH)):
-                try:
-                    result['template_result'] = tc.classify(fp_vec)
-                    click.echo(f"📐 Family templates: {len(tc.templates)} families")
-                except Exception as _tc_err:
-                    logger.debug(f"Template classify failed: {_tc_err}")
-
         print_report(result)
+        if 'error' in result:
+            sys.exit(1)
         click.echo("\n✅ Done!")
 
     except (OpenAIAuthError, OllamaCloudAuthError, DeepSeekAuthError, GeminiAuthError, CustomAuthError) as e:
@@ -443,10 +404,21 @@ def simulate(ctx, backend, endpoint, api_key, request_file, model, family, num_s
         for sim_idx in range(num_sims):
             temp = round(temperatures[sim_idx], 2)
             click.echo(f"\n  Simulation {sim_idx + 1}/{num_sims} (temp={temp}):")
-            fp = fingerprinter.fingerprint_model(model, repeats=repeats, temperature=temp)
+            fp = fingerprinter.fingerprint_model(
+                model, repeats=repeats, temperature=temp,
+                min_layer_coverage=config.TRAINING_MIN_LAYER_COVERAGE)
 
             if fp is None:
-                click.echo(click.style(f"    ⚠️ Failed (all prompts returned errors)", fg='yellow'))
+                click.echo(click.style(
+                    f"    ⚠️ Discarded — too few usable responses "
+                    f"(training requires ≥{config.TRAINING_MIN_LAYER_COVERAGE:.0%} of each "
+                    f"layer). See the log for which layer fell short.", fg='yellow'))
+                continue
+
+            # Belt and braces: never store a padded vector as labelled training data.
+            if fp['metadata'].get('incomplete'):
+                click.echo(click.style(
+                    "    ⚠️ Discarded — fingerprint contains padded layers", fg='yellow'))
                 continue
 
             fp['metadata']['model_name'] = model_display
@@ -476,15 +448,22 @@ def simulate(ctx, backend, endpoint, api_key, request_file, model, family, num_s
 @cli.command()
 @click.option('--augment/--no-augment', default=True, help='Data augmentation')
 @click.option('--use-pca', is_flag=True, default=False,
-              help='Use PCA reduction (default: use raw 402-dim features)')
+              help='Use additional global PCA after per-layer embedding reduction')
 @click.option('--pca-components', default=64, type=int,
               help='PCA components if --use-pca (default: 64)')
+@click.option('--early-stop-variants/--no-early-stop-variants', default=False,
+              show_default=True,
+              help='Add synthetic partial fingerprints so the classifier can score '
+                   'early-stopped runs. Off by default because full-suite '
+                   'identification does not need partial examples. Enable only if you use '
+                   '"identify --early-stop".')
 @click.option('--cross-validate', '-cv', is_flag=True, default=False,
               help='Run k-fold cross-validation before training')
 @click.option('--cv-folds', default=5, type=int,
               help='Number of cross-validation folds (default: 5)')
 @click.pass_context
-def train(ctx, augment, use_pca, pca_components, cross_validate, cv_folds):
+def train(ctx, augment, use_pca, pca_components, early_stop_variants,
+          cross_validate, cv_folds):
     """Train classifier from saved fingerprints.
 
     \b
@@ -499,16 +478,20 @@ def train(ctx, augment, use_pca, pca_components, cross_validate, cv_folds):
 
     mode = f"PCA ({pca_components} components)" if use_pca else "rebalanced features (per-layer)"
     click.echo(f"🔧 Training mode: {mode}")
+    click.echo(f"   Early-stop variants: "
+               f"{'on' if early_stop_variants else 'off (recommended)'}")
 
     try:
         # Load from new training dir, fall back to legacy fingerprints dir
         training_data = {}
+        training_groups = {}
         for search_dir in [config.TRAINING_DIR, config.FINGERPRINTS_DIR]:
             store = FingerprintStore(str(search_dir))
             click.echo(f"\n📂 Loading fingerprints from {search_dir.name}/...")
-            data = store.export_for_training()
+            data, groups = store.export_for_training(with_groups=True)
             for family, vectors in data.items():
                 training_data.setdefault(family, []).extend(vectors)
+                training_groups.setdefault(family, []).extend(groups[family])
 
         if not training_data:
             click.echo(click.style("❌ No fingerprints found", fg='red'))
@@ -533,7 +516,8 @@ def train(ctx, augment, use_pca, pca_components, cross_validate, cv_folds):
             use_pca=use_pca,
             pca_components=pca_components,
             augment_data=augment,
-            augment_samples=config.AUGMENTATION_SAMPLES_PER_ORIGINAL if augment else 0
+            augment_samples=config.AUGMENTATION_SAMPLES_PER_ORIGINAL if augment else 0,
+            early_stop_variants=early_stop_variants,
         )
 
         if not clf.train_from_simulations(training_data):
@@ -544,22 +528,36 @@ def train(ctx, augment, use_pca, pca_components, cross_validate, cv_folds):
         if cross_validate:
             click.echo(f"\n📈 Running {cv_folds}-fold cross-validation...")
             import numpy as np
-            X_list, y_list = [], []
+            X_list, y_list, g_list = [], [], []
             for family_name, vectors in training_data.items():
                 if family_name not in config.MODEL_FAMILIES:
                     continue
                 class_id = config.MODEL_FAMILIES[family_name]
-                for v in vectors:
+                fam_groups = training_groups.get(family_name, [])
+                for i, v in enumerate(vectors):
                     X_list.append(np.array(v, dtype=np.float32) if not isinstance(v, np.ndarray) else v)
                     y_list.append(class_id)
+                    # Fall back to a unique group when the model is unknown.
+                    g_list.append(fam_groups[i] if i < len(fam_groups)
+                                  else f"__ungrouped__{family_name}_{i}")
 
             X_cv = np.array(X_list, dtype=np.float32)
             y_cv = np.array(y_list)
+            g_cv = np.array(g_list)
 
-            cv_results = clf.cross_validate(X_cv, y_cv, n_folds=cv_folds)
+            # Group by model: repeated simulations of one model are
+            # near-duplicates and must not straddle a fold boundary.
+            cv_results = clf.cross_validate(X_cv, y_cv, n_folds=cv_folds, groups=g_cv)
             if cv_results:
-                click.echo(f"\n   Mean accuracy: {cv_results['mean_accuracy']:.1%} "
-                          f"({cv_results['n_folds']} folds)")
+                if cv_results.get('grouped'):
+                    click.echo(f"   Grouping by model — {len(set(g_list))} distinct "
+                               f"models across {len(X_list)} fingerprints")
+                    click.echo(f"   Folds capped at {cv_results['n_folds']} by family "
+                               f"'{cv_results['limiting_family']}' "
+                               f"({cv_results['n_groups']} distinct model(s))")
+                click.echo(f"\n   Identification accuracy (unknown counts as incorrect): {cv_results['mean_accuracy']:.1%} "
+                          f"({cv_results['n_folds']} folds"
+                          f"{', grouped by model' if cv_results.get('grouped') else ''})")
                 click.echo(f"\n   Per-family metrics:")
                 click.echo(f"   {'Family':12s} {'Prec':>6s} {'Recall':>8s} {'F1':>6s} {'Support':>8s}")
                 click.echo(f"   {'-'*42}")
@@ -570,16 +568,22 @@ def train(ctx, augment, use_pca, pca_components, cross_validate, cv_folds):
                 click.echo(f"\n   Fold accuracies: "
                           + ", ".join(f"{a:.1%}" for a in cv_results['fold_accuracies']))
             else:
-                click.echo(click.style("   ⚠️ Not enough samples per class for cross-validation", fg='yellow'))
+                click.echo(click.style(
+                    "   ⚠️ Cross-validation skipped — not enough distinct models per "
+                    "family to split without leaking near-duplicate simulations "
+                    "across folds. See the log for the limiting family.", fg='yellow'))
 
         classifier_path = config.MODEL_DIR / "classifier_model.joblib"
-        clf.save(str(classifier_path))
+        if not clf.save(str(classifier_path)):
+            raise click.ClickException("Failed to save the classifier")
+        if clf.family_templates is None or not clf.family_templates.save(str(config.TEMPLATES_PATH)):
+            raise click.ClickException("Failed to save the matching family templates")
 
         click.echo(f"\n✅ Classifier trained and saved!")
         click.echo(f"   Mode: {mode}")
         click.echo(f"   Input dim: {clf.input_dim}")
+        click.echo("   Matching family templates saved.")
         click.echo("\n💡 Next steps:")
-        click.echo("   build-templates        # enable open-set family detection + add-family")
         click.echo("   build-model-templates  # enable specific model version identification")
         click.echo("   identify --model <model-name>")
 
@@ -665,10 +669,12 @@ def list_fingerprints():
     if classifier_path.exists():
         try:
             import joblib
-            data = joblib.load(classifier_path)
+            data = joblib.load(config.ensure_trusted_artifact(classifier_path))
             mode = "PCA" if data.get('use_pca', False) else "raw features"
             dims = data.get('input_dim', '?')
             click.echo(f"✅ Classifier trained ({mode}, {dims} dims)")
+        except config.UntrustedArtifactError as e:
+            click.echo(click.style(f"⛔ Classifier not loaded — {e}", fg='red'))
         except Exception:
             click.echo("✅ Classifier available")
     else:
@@ -676,17 +682,25 @@ def list_fingerprints():
 
     if config.TEMPLATES_PATH.exists():
         tc = TemplateClassifier()
-        tc.load(str(config.TEMPLATES_PATH))
-        click.echo(f"✅ Family templates built ({len(tc.templates)} families: "
-                   f"{', '.join(sorted(tc.templates))})")
+        if tc.load(str(config.TEMPLATES_PATH)):
+            click.echo(f"✅ Family templates built ({len(tc.templates)} families: "
+                       f"{', '.join(sorted(tc.templates))})")
+        else:
+            click.echo(click.style(
+                f"❌ Family templates present but unreadable: {config.TEMPLATES_PATH}",
+                fg='red'))
     else:
         click.echo("⚠️  No family templates — run 'build-templates'")
 
     if config.MODEL_TEMPLATES_PATH.exists():
         mtc = TemplateClassifier()
-        mtc.load(str(config.MODEL_TEMPLATES_PATH))
-        click.echo(f"✅ Model templates built  ({len(mtc.templates)} models: "
-                   f"{', '.join(sorted(mtc.templates))})")
+        if mtc.load(str(config.MODEL_TEMPLATES_PATH)):
+            click.echo(f"✅ Model templates built  ({len(mtc.templates)} models: "
+                       f"{', '.join(sorted(mtc.templates))})")
+        else:
+            click.echo(click.style(
+                f"❌ Model templates present but unreadable: "
+                f"{config.MODEL_TEMPLATES_PATH}", fg='red'))
     else:
         click.echo("⚠️  No model templates  — run 'build-model-templates'")
 
@@ -727,10 +741,12 @@ def info():
     if classifier_path.exists():
         try:
             import joblib
-            data = joblib.load(classifier_path)
+            data = joblib.load(config.ensure_trusted_artifact(classifier_path))
             mode = "PCA" if data.get('use_pca', False) else "raw features"
             dims = data.get('input_dim', '?')
             click.echo(f"  Classifier:      ✅ trained ({mode}, {dims} dims)")
+        except config.UntrustedArtifactError as e:
+            click.echo(click.style(f"  Classifier:      ⛔ untrusted path — {e}", fg='red'))
         except Exception:
             click.echo(f"  Classifier:      ✅ trained")
     else:
@@ -738,17 +754,23 @@ def info():
 
     if config.TEMPLATES_PATH.exists():
         tc = TemplateClassifier()
-        tc.load(str(config.TEMPLATES_PATH))
-        click.echo(f"  Family templates:✅ {len(tc.templates)} families "
-                   f"({', '.join(sorted(tc.templates))})")
+        if tc.load(str(config.TEMPLATES_PATH)):
+            click.echo(f"  Family templates:✅ {len(tc.templates)} families "
+                       f"({', '.join(sorted(tc.templates))})")
+        else:
+            click.echo(click.style("  Family templates:❌ present but unreadable",
+                                   fg='red'))
     else:
         click.echo(f"  Family templates:⚠️  not built   → run 'build-templates'")
 
     if config.MODEL_TEMPLATES_PATH.exists():
         mtc = TemplateClassifier()
-        mtc.load(str(config.MODEL_TEMPLATES_PATH))
-        click.echo(f"  Model templates: ✅ {len(mtc.templates)} models "
-                   f"({', '.join(sorted(mtc.templates))})")
+        if mtc.load(str(config.MODEL_TEMPLATES_PATH)):
+            click.echo(f"  Model templates: ✅ {len(mtc.templates)} models "
+                       f"({', '.join(sorted(mtc.templates))})")
+        else:
+            click.echo(click.style("  Model templates: ❌ present but unreadable",
+                                   fg='red'))
     else:
         click.echo(f"  Model templates: ⚠️  not built   → run 'build-model-templates'")
 
@@ -813,7 +835,7 @@ def test(ctx, backend, endpoint, api_key, request_file, model, prompt):
 @cli.command()
 @backend_options
 @click.option('--model', '-m', default=None, help='Model name')
-@click.option('--repeats', default=1, type=int, help='Prompt repeats (default: 1)')
+@click.option('--repeats', default=1, type=click.IntRange(min=1), help='Prompt repeats (default: 1)')
 @click.option('--output', type=click.Path(), help='Output directory')
 @click.pass_context
 def fingerprint(ctx, backend, endpoint, api_key, request_file, model, repeats, output):
@@ -918,7 +940,8 @@ def build_templates(ctx, ood_ratio):
             click.echo(click.style("❌ Failed to build templates", fg='red'))
             sys.exit(1)
 
-        tc.save(str(config.TEMPLATES_PATH))
+        if not tc.save(str(config.TEMPLATES_PATH)):
+            raise click.ClickException("Failed to save family templates")
         click.echo(f"\n✅ Built {len(tc.templates)} templates: "
                    f"{', '.join(sorted(tc.templates))}")
         click.echo(f"   Saved to: {config.TEMPLATES_PATH}")
@@ -933,8 +956,10 @@ def build_templates(ctx, ood_ratio):
 @cli.command('build-model-templates')
 @click.option('--ood-ratio', default=0.80, type=float, show_default=True,
               help='OOD ratio threshold for model-level classifier.')
-@click.option('--min-samples', default=1, type=int, show_default=True,
-              help='Skip models with fewer than this many fingerprints.')
+@click.option('--min-samples', default=2, type=int, show_default=True,
+              help='Skip models with fewer than this many fingerprints. '
+                   'Below 2 the OOD radius cannot be calibrated at all, '
+                   'which silently disables the distance-based OOD check.')
 @click.pass_context
 def build_model_templates(ctx, ood_ratio, min_samples):
     """Build per-model templates for specific model version identification.
@@ -999,7 +1024,8 @@ def build_model_templates(ctx, ood_ratio, min_samples):
             click.echo(click.style("❌ Failed to build model templates", fg='red'))
             sys.exit(1)
 
-        mtc.save(str(config.MODEL_TEMPLATES_PATH))
+        if not mtc.save(str(config.MODEL_TEMPLATES_PATH)):
+            raise click.ClickException("Failed to save model templates")
         click.echo(f"\n✅ Built templates for: {', '.join(sorted(mtc.templates))}")
         click.echo(f"   Saved to: {config.MODEL_TEMPLATES_PATH}")
         click.echo("   'identify' will now show a model-level estimate automatically.")
@@ -1066,9 +1092,12 @@ def add_family(ctx, backend, endpoint, api_key, request_file,
         vectors = []
         for i in range(num_fps):
             click.echo(f"  [{i + 1}/{num_fps}] Fingerprinting…", nl=False)
-            fp = fingerprinter.fingerprint_model(model, repeats=repeats)
-            if fp is None:
-                click.echo(click.style("  ⚠️  failed, skipping", fg='yellow'))
+            fp = fingerprinter.fingerprint_model(
+                model, repeats=repeats,
+                min_layer_coverage=config.TRAINING_MIN_LAYER_COVERAGE)
+            if fp is None or fp['metadata'].get('incomplete'):
+                click.echo(click.style(
+                    "  ⚠️  discarded (too few usable responses), skipping", fg='yellow'))
                 continue
             vectors.append(fp['vector'])
             click.echo(f"  ✅ ({fp['metadata']['queries_executed']} queries)")
@@ -1086,13 +1115,24 @@ def add_family(ctx, backend, endpoint, api_key, request_file,
         # Load or start a fresh template store
         tc = TemplateClassifier()
         if config.TEMPLATES_PATH.exists():
-            tc.load(str(config.TEMPLATES_PATH))
+            if not tc.load(str(config.TEMPLATES_PATH)):
+                # Saving now would replace a store we could not read with a
+                # single-family one, destroying every existing template.
+                click.echo(click.style(
+                    f"❌ Existing templates at {config.TEMPLATES_PATH} could not be "
+                    f"read (see the logged error).", fg='red'))
+                click.echo("   Refusing to continue — saving now would overwrite them "
+                           "with a single-family store.")
+                click.echo("   Fix or remove that file, or re-run 'build-templates'.")
+                sys.exit(1)
             click.echo(f"\n📂 Existing templates: {', '.join(sorted(tc.templates))}")
         else:
             click.echo("\n⚠️  No existing templates — creating new store")
 
-        tc.add_family(family, vectors)
-        tc.save(str(config.TEMPLATES_PATH))
+        if not tc.add_family(family, vectors):
+            raise click.ClickException("New family template has no usable signal")
+        if not tc.save(str(config.TEMPLATES_PATH)):
+            raise click.ClickException("Failed to save family templates")
 
         click.echo(f"\n✅ Added '{family}' from {len(vectors)} fingerprints")
         click.echo(f"   All families: {', '.join(sorted(tc.templates))}")
