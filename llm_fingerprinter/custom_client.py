@@ -24,6 +24,10 @@ Usage:
 
     client = CustomClient(request_file="request.txt")
     response = client.generate(prompt="Hello!")
+
+Responses may be JSON, SSE, NDJSON, or text/plain. For a known plaintext
+endpoint that omits Content-Type, pass allow_plain_text=True. Structured
+errors and malformed or incomplete streams always raise CustomGenerationError.
 """
 
 import requests
@@ -59,6 +63,12 @@ class CustomAuthError(CustomClientError):
     pass
 
 
+class CustomTransientError(CustomClientError):
+    """Raised when the backend produced no answer but is expected to succeed on
+    retry (e.g. an Ollama-style model-load placeholder). Retried by generate()."""
+    pass
+
+
 class CustomClient(BaseClient):
 
     def __init__(self,
@@ -71,7 +81,8 @@ class CustomClient(BaseClient):
                  default_temperature: float = 0.7,
                  default_max_tokens: int = 512,
                  default_system: Optional[str] = None,
-                 response_path: Optional[List] = None):
+                 response_path: Optional[List] = None,
+                 allow_plain_text: bool = False):
         super().__init__(timeout=timeout)
 
         self.api_key = api_key
@@ -84,6 +95,9 @@ class CustomClient(BaseClient):
         self.default_system = default_system or ""
 
         self.response_path = response_path
+        # Unframed text is accepted when the server declares text/plain, or
+        # explicitly for a known plaintext endpoint lacking that content type.
+        self.allow_plain_text = allow_plain_text
 
         self.url: Optional[str] = None
         self.payload_template: Optional[str] = None
@@ -179,19 +193,10 @@ class CustomClient(BaseClient):
             raise CustomGenerationError(f"Invalid payload after substitution: {e}")
 
     def _extract_response_text(self, data):
+        self._raise_for_response_error(data)
 
-        # Check for empty/loading responses
-        if isinstance(data, dict):
-            done_reason = data.get('done_reason', '')
-            if done_reason == 'load':
-                return ""
-
-            if 'response' in data and data['response'] == '' and data.get('done'):
-                return ""
-
-            if 'error' in data:
-                logger.error(f"API returned error: {data['error']}")
-                return ""
+        if isinstance(data, str):
+            return data
 
         # Try configured path first
         if self.response_path:
@@ -213,8 +218,8 @@ class CustomClient(BaseClient):
                     path_valid = False
                     break
 
-            if path_valid and isinstance(result, str) and result.strip():
-                return result.strip()
+            if path_valid and isinstance(result, str) and result != '':
+                return result
 
         # Try fallback paths
         fallback_paths = [
@@ -234,6 +239,8 @@ class CustomClient(BaseClient):
             ["data", "text"],
             ["message", "content"],
             ["content", 0, "text"],
+            ["delta", "text"],
+            ["delta"],
         ]
 
         for path in fallback_paths:
@@ -256,68 +263,134 @@ class CustomClient(BaseClient):
                     path_valid = False
                     break
 
-            if path_valid and isinstance(result, str) and result.strip():
-                return result.strip()
+            if path_valid and isinstance(result, str) and result != '':
+                return result
 
         return ""
 
-    def _parse_streaming_response(self, response_text):
-        full_text = []
+    @staticmethod
+    def _raise_for_response_error(data):
+        # Arrays are ordinary JSON responses too; never return their serialized
+        # error records via a plaintext fallback or an otherwise valid path.
+        if isinstance(data, list):
+            for item in data:
+                CustomClient._raise_for_response_error(item)
+        elif isinstance(data, dict):
+            # Some compatible APIs include error:null on successful responses.
+            if data.get('error') is not None or data.get('type') in ('error', 'response.failed', 'response.incomplete'):
+                raise CustomGenerationError(
+                    f"API returned an error payload: {data.get('error', data)}"
+                )
+            if data.get('done_reason') == 'load':
+                raise CustomTransientError(
+                    "Backend returned a model-load placeholder (no answer yet)"
+                )
 
-        lines = response_text.strip().split('\n')
+    @staticmethod
+    def _looks_like_sse(text):
+        first_line = text.lstrip().split('\n', 1)[0]
+        return first_line.startswith(('data:', 'event:', 'id:', 'retry:', ':'))
 
-        for line in lines:
-            line = line.strip()
+    @staticmethod
+    def _sse_records(response_text):
+        """Decode SSE events, joining multiple data fields before JSON parsing."""
+        data_lines = []
+        event = ''
+        # SSE recognizes CR/LF, not every Unicode line separator in JSON text.
+        lines = response_text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+        for line in lines + ['']:
             if not line:
+                if event == 'error':
+                    raise CustomGenerationError(
+                        f"API returned an error event: {' '.join(data_lines)}"
+                    )
+                if data_lines:
+                    data = '\n'.join(data_lines)
+                    if data.strip():
+                        yield data
+                data_lines = []
+                event = ''
                 continue
+            if line.startswith(':'):
+                continue
+            field, separator, value = line.partition(':')
+            if not separator and field not in ('data', 'event', 'id', 'retry'):
+                raise CustomGenerationError("Malformed SSE response frame")
+            if value.startswith(' '):
+                value = value[1:]
+            if field == 'data':
+                data_lines.append(value)
+            elif field == 'event':
+                event = value
+            elif field not in ('id', 'retry'):
+                raise CustomGenerationError(f"Malformed SSE response field: {field}")
 
-            objects = self._split_json_objects(line)
+    def _parse_streaming_response(self, response_text, framing=None):
+        """Assemble a complete stream, rejecting errors and malformed tails."""
+        if framing is None:
+            framing = 'sse' if self._looks_like_sse(response_text) else 'json'
+        records = (self._sse_records(response_text) if framing == 'sse'
+                   else self._split_json_objects(response_text))
+        full_text = []
+        requires_completion = False
+        complete = False
+        sentinel_seen = False
+        for record in records:
+            if record.strip() == '[DONE]':
+                complete = sentinel_seen = True
+                continue
+            try:
+                obj = json.loads(record)
+            except ValueError as exc:
+                raise CustomGenerationError("Malformed JSON in streaming response") from exc
+            self._raise_for_response_error(obj)
+            if not isinstance(obj, dict):
+                raise CustomGenerationError("Expected a JSON object in streaming response")
+            if sentinel_seen:
+                raise CustomGenerationError("Received data after stream completion")
 
-            for obj_str in objects:
-                try:
-                    obj = json.loads(obj_str)
-                    text = self._extract_response_text(obj)
-                    if text:
-                        full_text.append(text)
-                except json.JSONDecodeError:
-                    continue
+            event_type = obj.get('type', '')
+            # Responses API "done" events repeat the already streamed text.
+            # Only token deltas contribute to the assembled answer.
+            text = ('' if event_type == 'response.output_text.done'
+                    else self._extract_response_text(obj))
+            if complete and text:
+                raise CustomGenerationError("Received answer text after stream completion")
+            full_text.append(text)
 
+            # These protocols define explicit completion. EOF after a valid
+            # token record alone must not make a truncated answer successful.
+            if 'choices' in obj:
+                requires_completion = True
+                choices = obj['choices']
+                if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                    complete |= choices[0].get('finish_reason') is not None
+            if 'done' in obj or 'response' in obj or isinstance(obj.get('message'), dict):
+                requires_completion = True
+                complete |= obj.get('done') is True
+            if isinstance(event_type, str) and event_type.startswith(('message_', 'content_block_', 'response.')):
+                requires_completion = True
+                complete |= event_type in ('message_stop', 'response.completed')
+
+        if requires_completion and not complete:
+            raise CustomGenerationError("Incomplete streaming response: missing completion marker")
         return ''.join(full_text)
 
-    def _split_json_objects(self, text: str):
-
-        objects = []
-        depth = 0
-        start = 0
-        in_string = False
-        escape_next = False
-
-        for i, char in enumerate(text):
-            if escape_next:
-                escape_next = False
+    @staticmethod
+    def _split_json_objects(text: str):
+        """Decode every JSON value; never skip junk or incomplete final records."""
+        decoder = json.JSONDecoder()
+        offset = 0
+        while offset < len(text):
+            if text[offset].isspace():
+                offset += 1
                 continue
-
-            if char == '\\' and in_string:
-                escape_next = True
-                continue
-
-            if char == '"' and not escape_next:
-                in_string = not in_string
-                continue
-
-            if in_string:
-                continue
-
-            if char == '{':
-                if depth == 0:
-                    start = i
-                depth += 1
-            elif char == '}':
-                depth -= 1
-                if depth == 0:
-                    objects.append(text[start:i+1])
-
-        return objects
+            try:
+                _, end = decoder.raw_decode(text, offset)
+            except ValueError as exc:
+                raise CustomGenerationError("Malformed or truncated JSON response") from exc
+            yield text[offset:end]
+            offset = end
 
     def _perform_health_check(self) -> bool:
         if not self.url:
@@ -342,7 +415,11 @@ class CustomClient(BaseClient):
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((requests.Timeout, requests.ConnectionError))
+        retry=retry_if_exception_type(
+            (requests.Timeout, requests.ConnectionError,
+             CustomConnectionError, CustomTransientError)
+        ),
+        reraise=True,
     )
     def generate(self, prompt="", model=None,
                  temperature=None, max_tokens=None,
@@ -359,30 +436,54 @@ class CustomClient(BaseClient):
 
             if response.status_code == 200:
                 response_text = response.text
+                content_type = getattr(response, 'headers', {}).get('Content-Type', '')
+                content_type = content_type.split(';', 1)[0].strip().lower()
+                text = ''
 
-                # First, try to parse as single JSON object
-                try:
-                    result = response.json()
-                    text = self._extract_response_text(result)
-                    if text:
-                        logger.debug(f"Generated {len(text)} chars in {elapsed:.2f}s")
-                        return text
-                except json.JSONDecodeError:
-                    pass
+                # Select framing before extraction. A failed structured payload
+                # is never reinterpreted as plaintext or mined for inner objects.
+                if content_type == 'text/event-stream' or self._looks_like_sse(response_text):
+                    text = self._parse_streaming_response(response_text, framing='sse')
+                elif content_type in ('application/x-ndjson', 'application/ndjson',
+                                       'application/jsonl', 'application/jsonlines'):
+                    text = self._parse_streaming_response(response_text, framing='json')
+                else:
+                    try:
+                        result = response.json()
+                    except ValueError:
+                        if (response_text.lstrip().startswith(('{', '['))
+                                or content_type == 'application/json'
+                                or content_type.endswith('+json')):
+                            text = self._parse_streaming_response(response_text, framing='json')
+                        elif content_type == 'text/plain' or (
+                                self.allow_plain_text and not content_type):
+                            text = response_text
+                    else:
+                        self._raise_for_response_error(result)
+                        # A one-record Ollama/OpenAI stream can be a truncated
+                        # request too. Ordinary nonstreaming JSON needs no marker.
+                        is_stream_record = isinstance(result, dict) and (
+                            any(key in result for key in ('done', 'response', 'choices'))
+                            or isinstance(result.get('message'), dict)
+                        )
+                        if payload.get('stream') is True and is_stream_record:
+                            text = self._parse_streaming_response(response_text, framing='json')
+                        else:
+                            text = self._extract_response_text(result)
 
-                # If that fails, try to parse as streaming response
-                text = self._parse_streaming_response(response_text)
-                if text:
-                    logger.debug(f"Generated {len(text)} chars (streaming) in {elapsed:.2f}s")
+                # Validate once, after assembly; whitespace inside and around
+                # tokens is model output and must survive fingerprinting intact.
+                if text.strip():
+                    logger.debug(f"Generated {len(text)} chars in {elapsed:.2f}s")
                     return text
 
-                # Last resort: check if it's just plain text
-                if response_text.strip() and not response_text.strip().startswith('{'):
-                    return response_text.strip()
-
-                logger.error("Could not extract text from response")
-                logger.debug(f"Response: {response_text[:500]}")
-                return ""
+                logger.debug(f"Unparseable response: {response_text[:500]}")
+                raise CustomGenerationError(
+                    f"Could not extract any text from the 200 response "
+                    f"({len(response_text)} bytes). Check the endpoint, or set "
+                    f"response_path to point at the text field. Plaintext endpoints "
+                    f"must return Content-Type: text/plain or use allow_plain_text=True."
+                )
 
             elif response.status_code == 401:
                 raise CustomAuthError("Invalid API key")

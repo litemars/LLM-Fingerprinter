@@ -10,9 +10,11 @@ from llm_fingerprinter.feature_extractor import FeatureExtractor
 from llm_fingerprinter.prompt_suite import PromptSuite
 from llm_fingerprinter.fingerprint_store import FingerprintStore
 from llm_fingerprinter.base_client import BaseClient, ClientError
+from llm_fingerprinter.identification import IdentificationPipeline
 
 __all__ = [
     "LLMFingerprinter",
+    "IdentificationPipeline",
     "EnsembleClassifier",
     "create_classifier",
     "FeatureExtractor",

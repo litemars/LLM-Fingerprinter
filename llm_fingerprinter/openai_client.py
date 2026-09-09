@@ -152,6 +152,13 @@ class OpenAIClient(BaseClient):
             text = response.choices[0].message.content
             text = text.strip() if text else ""
 
+            if not text:
+                finish = getattr(response.choices[0], "finish_reason", None)
+                raise OpenAIGenerationError(
+                    f"Model '{model}' returned no content "
+                    f"(finish_reason={finish!r})"
+                )
+
             usage = response.usage
             completion_tokens = usage.completion_tokens if usage else 0
 

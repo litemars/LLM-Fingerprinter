@@ -112,6 +112,12 @@ class GeminiClient(BaseClient):
 
             text = response.text.strip() if response.text else ""
 
+            if not text:
+                finish = getattr(response.candidates[0], 'finish_reason', None)
+                raise GeminiGenerationError(
+                    f"Model '{model}' returned no text (finish_reason={finish!r})"
+                )
+
             usage = getattr(response, 'usage_metadata', None)
             output_tokens = getattr(usage, 'candidates_token_count', 0) if usage else 0
 

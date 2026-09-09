@@ -22,7 +22,9 @@ class EnsembleClassifier:
                  embedding_pca_dim = 64,
                  n_layers = 3,
                  ood_confidence_threshold = 0.3,
-                 ood_disagreement_threshold = 0.15):
+                 ood_disagreement_threshold = 0.15,
+                 early_stop_variants = False,
+                 random_state = 42):
 
         self.model_families = model_families if model_families is not None else config.MODEL_FAMILIES
 
@@ -41,20 +43,26 @@ class EnsembleClassifier:
         self.embedding_pcas = None
         self.per_layer_block_size = None
         self.per_layer_embed_dim = None
+        self.preprocessing_version = 2
+        self.feature_mask = None
+        self.family_templates = None
 
         # OOD detection settings
         self.ood_confidence_threshold = ood_confidence_threshold
         self.ood_disagreement_threshold = ood_disagreement_threshold
 
+        self.early_stop_variants = early_stop_variants
+
         # Augmentation settings
         self.augment_data = augment_data
         self.augment_noise_std = augment_noise_std
         self.augment_samples = augment_samples
+        self.random_state = random_state
 
         # Classifiers
         self.rf = RandomForestClassifier(
             n_estimators=100,
-            random_state=42,
+            random_state=random_state,
             n_jobs=-1,
             class_weight='balanced'
         )
@@ -62,13 +70,13 @@ class EnsembleClassifier:
             kernel='rbf',
             C=1.0,
             probability=True,
-            random_state=42,
+            random_state=random_state,
             class_weight='balanced'
         )
         self.mlp = MLPClassifier(
             hidden_layer_sizes=(128, 64),
             max_iter=1000,
-            random_state=42,
+            random_state=random_state,
             early_stopping=True,
             validation_fraction=0.1
         )
@@ -139,9 +147,10 @@ class EnsembleClassifier:
 
         X_aug_list = [X]
         y_aug_list = [y]
+        rng = np.random.default_rng(self.random_state)
 
         for _ in range(self.augment_samples):
-            noise    = np.random.normal(0, self.augment_noise_std, X.shape)
+            noise    = rng.normal(0, self.augment_noise_std, X.shape)
             X_noisy  = X + noise * X_std
             # Clip to observed range to prevent impossible values
             X_noisy  = np.clip(X_noisy, X_min, X_max)
@@ -154,6 +163,33 @@ class EnsembleClassifier:
         logger.info(f"Augmented {len(X)} → {len(X_aug)} samples")
         return X_aug, y_aug
 
+    @staticmethod
+    def _fit_stable_pca(X, max_components, precision):
+        """Fit only components supported by the centered observation matrix.
+
+        Use the numerical-rank tolerance for the source precision, even though
+        fitting uses float64. Casting float32 inputs must not turn their rounding
+        noise into extra measured dimensions. No variance threshold is tuned on
+        validation data.
+        """
+        count = min(int(max_components), len(X) - 1, X.shape[1])
+        if count <= 0 or not np.any(np.ptp(X, axis=0)):
+            return None
+        pca = PCA(n_components=count, svd_solver="full")
+        pca.fit(X)
+        tolerance = pca.singular_values_[0] * max(X.shape) * precision
+        rank = int(np.count_nonzero(pca.singular_values_ > tolerance))
+        if rank == 0:
+            return None
+        
+        pca.components_ = pca.components_[:rank]
+        pca.explained_variance_ = pca.explained_variance_[:rank]
+        pca.explained_variance_ratio_ = pca.explained_variance_ratio_[:rank]
+        pca.singular_values_ = pca.singular_values_[:rank]
+        pca.n_components_ = rank
+        pca.n_components = rank
+        return pca
+
     def _rebalance_features(self, X: np.ndarray, fit: bool = False):
         """Compress embedding dimensions per layer block to rebalance feature groups.
 
@@ -161,21 +197,39 @@ class EnsembleClassifier:
         Output: (n_samples, n_layers * (embedding_pca_dim + non_embed_dim)) e.g. (N, 246)
         """
         n_features = X.shape[1]
-        assert n_features % self.n_layers == 0, \
-            f"Feature dim {n_features} not divisible by n_layers {self.n_layers}"
-        per_layer_dim = n_features // self.n_layers
+        if n_features % self.n_layers != 0:
+            raise ValueError(
+                f"Feature dim {n_features} is not divisible by n_layers "
+                f"{self.n_layers} — cannot split it into per-layer blocks"
+            )
         non_embed_dim = config.LINGUISTIC_DIM + config.BEHAVIORAL_DIM  # 18
-        embed_dim = per_layer_dim - non_embed_dim
 
         if fit:
+            if not hasattr(self, "_fit_precision"):
+                dtype = X.dtype if np.issubdtype(X.dtype, np.floating) else np.dtype("float64")
+                self._fit_precision = np.finfo(dtype).eps
+            per_layer_dim = n_features // self.n_layers
+            embed_dim = per_layer_dim - non_embed_dim
+            if embed_dim <= 0 or self.embedding_pca_dim < 1:
+                raise ValueError("Each layer must contain embeddings and embedding_pca_dim must be positive")
             self.per_layer_block_size = per_layer_dim
             self.per_layer_embed_dim = embed_dim
-            actual_components = min(self.embedding_pca_dim, X.shape[0], embed_dim)
-            if actual_components < self.embedding_pca_dim:
-                logger.warning(f"Reducing embedding PCA: {self.embedding_pca_dim} -> {actual_components}")
-            self.embedding_pcas = [
-                PCA(n_components=actual_components) for _ in range(self.n_layers)
-            ]
+            self.embedding_pcas = []
+        else:
+            per_layer_dim = (self.per_layer_block_size
+                             if self.per_layer_block_size is not None
+                             else n_features // self.n_layers)
+            embed_dim = (self.per_layer_embed_dim
+                         if self.per_layer_embed_dim is not None
+                         else per_layer_dim - non_embed_dim)
+            expected = per_layer_dim * self.n_layers
+            if n_features != expected:
+                raise ValueError(
+                    f"Fingerprint has {n_features} features but this classifier "
+                    f"was fitted on {expected} "
+                    f"({self.n_layers} layers x {per_layer_dim}). Re-run 'train', "
+                    f"or regenerate the fingerprint with the matching version."
+                )
 
         if self.embedding_pcas is None:
             return X
@@ -187,46 +241,86 @@ class EnsembleClassifier:
             non_embeddings = X[:, start + embed_dim:start + per_layer_dim]
 
             if fit:
-                compressed = self.embedding_pcas[layer_idx].fit_transform(embeddings)
-                variance = self.embedding_pcas[layer_idx].explained_variance_ratio_.sum()
+                pca = self._fit_stable_pca(
+                    embeddings, self.embedding_pca_dim, self._fit_precision)
+                self.embedding_pcas.append(pca)
+            else:
+                pca = self.embedding_pcas[layer_idx]
+            # A constant embedding block has rank zero and contributes no
+            # measured information; keep its linguistic/behavioral features.
+            compressed = (pca.transform(embeddings) if pca is not None
+                          else np.empty((len(X), 0)))
+            if fit:
+                variance = pca.explained_variance_ratio_.sum() if pca is not None else 0.0
                 logger.info(f"Layer {layer_idx} embedding PCA: {compressed.shape[1]} components, "
                            f"{variance:.1%} variance retained")
-            else:
-                compressed = self.embedding_pcas[layer_idx].transform(embeddings)
 
             rebalanced_blocks.append(np.hstack([compressed, non_embeddings]))
 
         return np.hstack(rebalanced_blocks)
 
     def _preprocess(self, X: np.ndarray, fit = False):
+        X = np.asarray(X)
+        if X.ndim != 2 or not np.isfinite(X).all():
+            raise ValueError("Features must be a finite two-dimensional matrix")
         if fit:
+            source_dtype = X.dtype if np.issubdtype(X.dtype, np.floating) else np.dtype("float64")
+            self._fit_precision = np.finfo(source_dtype).eps
+            X = X.astype(np.float64)
             self.input_dim = X.shape[1]
+            self.preprocessing_version = 2
 
             # Step 1: Rebalance features (compress embeddings per layer)
             X_rebalanced = self._rebalance_features(X, fit=True)
             logger.info(f"Rebalanced: {X.shape[1]} -> {X_rebalanced.shape[1]} dimensions")
 
-            # Step 2: Scale
-            X_scaled = self.scaler.fit_transform(X_rebalanced)
+            # Step 2: scale measured features, preserving geometry within each
+            # PCA embedding block. Independently standardizing every component
+            # would whiten it and amplify weak/unstable directions.
+            self.scaler.fit(X_rebalanced)
+            tolerance = self._fit_precision * np.maximum(
+                1.0, np.abs(self.scaler.mean_))
+            self.feature_mask = np.sqrt(self.scaler.var_) > tolerance
+            offset = 0
+            non_embed_dim = self.per_layer_block_size - self.per_layer_embed_dim
+            for pca in self.embedding_pcas:
+                width = pca.n_components_ if pca is not None else 0
+                if width:
+                    block = slice(offset, offset + width)
+                    # A common RMS scale gives the block unit average variance
+                    # without magnifying its low-variance components.
+                    self.scaler.scale_[block] = np.sqrt(np.mean(self.scaler.var_[block]))
+                    self.feature_mask[block] = True
+                offset += width + non_embed_dim
+            if not np.any(self.feature_mask):
+                raise ValueError("Training data has no varying features")
+            X_scaled = self.scaler.transform(X_rebalanced)[:, self.feature_mask]
 
             # Step 3: Optional global PCA
             if self.use_pca:
-                max_components = min(X_scaled.shape[0], X_scaled.shape[1])
-                self.pca_components = min(self.pca_target_components, max_components)
-
-                if self.pca_components < self.pca_target_components:
-                    logger.warning(f"Reducing global PCA: {self.pca_target_components} -> {self.pca_components}")
-
-                self.pca = PCA(n_components=self.pca_components)
-                X_out = self.pca.fit_transform(X_scaled)
+                self.pca = self._fit_stable_pca(
+                    X_scaled, self.pca_target_components, self._fit_precision)
+                if self.pca is None:
+                    raise ValueError("Training data has no usable PCA components")
+                self.pca_components = self.pca.n_components_
+                X_out = self.pca.transform(X_scaled)
                 variance = self.pca.explained_variance_ratio_.sum()
                 logger.info(f"Global PCA: {X_out.shape[1]} components, {variance:.1%} variance")
             else:
                 X_out = X_scaled
                 logger.info(f"Using rebalanced features: {X_out.shape[1]} dimensions")
         else:
+            if self.input_dim is not None and X.shape[1] != self.input_dim:
+                raise ValueError(
+                    f"Fingerprint has {X.shape[1]} features but this classifier "
+                    f"was trained on {self.input_dim}. This usually means the "
+                    f"fingerprint and the classifier were produced by different "
+                    f"versions — re-run 'train'."
+                )
             X_rebalanced = self._rebalance_features(X, fit=False)
             X_scaled = self.scaler.transform(X_rebalanced)
+            if self.feature_mask is not None:
+                X_scaled = X_scaled[:, self.feature_mask]
             if self.use_pca and self.pca is not None:
                 X_out = self.pca.transform(X_scaled)
             else:
@@ -235,6 +329,12 @@ class EnsembleClassifier:
         return X_out
 
     def train(self, X: np.ndarray, y: np.ndarray):
+        X, y = np.asarray(X), np.asarray(y)
+        self.is_trained = False
+        self.family_templates = None
+        if X.ndim != 2 or y.ndim != 1 or len(X) != len(y):
+            logger.error("Training requires a feature matrix and one label per row")
+            return False
         if X.shape[0] == 0:
             logger.error("Empty training data")
             return False
@@ -246,15 +346,28 @@ class EnsembleClassifier:
         logger.info(f"PCA mode: {'enabled' if self.use_pca else 'disabled (raw features)'}")
 
         try:
-            # Step 1: add synthetic partial-fingerprint variants so the
-            # classifier handles early-stopped inference correctly.
-            X_exp, y_exp = self._generate_early_stop_variants(X, y)
+            # Learn representation only from genuinely observed fingerprints.
+            # Augmentation can regularize the classifiers but cannot add rank
+            # or change the scale of the measured training population.
+            self._preprocess(X, fit=True)
+
+            # Step 1: optionally add synthetic partial-fingerprint variants so
+            # the classifier handles early-stopped inference correctly. Off by
+            # default — see the note in __init__.
+            if self.early_stop_variants:
+                X_exp, y_exp = self._generate_early_stop_variants(X, y)
+            else:
+                X_exp, y_exp = X, y
+                logger.info(
+                    "Early-stop variants disabled — training on real fingerprints "
+                    "only. Pass --early-stop-variants if you use `identify --early-stop`."
+                )
 
             # Step 2: noise augmentation on full + partial variants
             X_train, y_train = self._augment_samples(X_exp, y_exp)
 
             # Step 3: Preprocess (rebalance + scale, optionally PCA)
-            X_processed = self._preprocess(X_train, fit=True)
+            X_processed = self._preprocess(X_train, fit=False)
             
             logger.info(f"Training features shape: {X_processed.shape}")
 
@@ -267,7 +380,21 @@ class EnsembleClassifier:
             
             logger.info("Training MLP...")
             # MLP has no class_weight; imbalance is handled by RF/SVM (balanced).
+            _, counts = np.unique(y_train, return_counts=True)
+            self.mlp.set_params(early_stopping=(
+                counts.min() >= 2 and
+                int(np.ceil(len(y_train) * self.mlp.validation_fraction)) >= len(counts)
+            ))
             self.mlp.fit(X_processed, y_train)
+
+            from llm_fingerprinter.template_classifier import TemplateClassifier
+            templates = TemplateClassifier()
+            if not templates.build({
+                self.families_inv[int(label)]: list(X[y == label])
+                for label in np.unique(y)
+            }):
+                raise ValueError("Could not build family templates from the training observations")
+            self.family_templates = templates
 
             self.is_trained = True
             logger.info("Training complete")
@@ -390,6 +517,11 @@ class EnsembleClassifier:
                 'augment_data': self.augment_data,
                 'augment_noise_std': self.augment_noise_std,
                 'augment_samples': self.augment_samples,
+                'early_stop_variants': self.early_stop_variants,
+                'random_state': self.random_state,
+                'preprocessing_version': self.preprocessing_version,
+                'feature_mask': self.feature_mask,
+                'family_templates': self.family_templates,
                 # Embedding rebalancing
                 'embedding_pcas': self.embedding_pcas,
                 'embedding_pca_dim': self.embedding_pca_dim,
@@ -409,7 +541,15 @@ class EnsembleClassifier:
             return False
 
     def load(self, filepath):
-        """Load trained classifier from file."""
+        """Load trained classifier from file.
+
+        Raises:
+            config.UntrustedArtifactError: if `filepath` is outside every
+                trusted root. joblib.load unpickles, which executes code from
+                whoever wrote the file, so this is checked before opening it
+                and is deliberately NOT swallowed by the except below.
+        """
+        filepath = config.ensure_trusted_artifact(filepath)
         try:
             data = joblib.load(filepath)
 
@@ -427,6 +567,11 @@ class EnsembleClassifier:
             self.augment_data = data.get('augment_data', True)
             self.augment_noise_std = data.get('augment_noise_std', 0.01)
             self.augment_samples = data.get('augment_samples', 5)
+            self.early_stop_variants = data.get('early_stop_variants', True)
+            self.random_state = data.get('random_state', 42)
+            self.preprocessing_version = data.get('preprocessing_version', 1)
+            self.feature_mask = data.get('feature_mask')
+            self.family_templates = data.get('family_templates')
 
             # Embedding rebalancing
             self.embedding_pcas = data.get('embedding_pcas')
@@ -445,6 +590,8 @@ class EnsembleClassifier:
             mode = "with PCA" if self.use_pca else "rebalanced features"
             logger.info(f"Loaded classifier ({mode}) from {filepath}")
             return True
+        except config.UntrustedArtifactError:
+            raise
         except Exception as e:
             logger.error(f"Failed to load classifier: {e}")
             return False
@@ -501,13 +648,61 @@ class EnsembleClassifier:
         return self.train(X, y)
 
 
-    def cross_validate(self, X: np.ndarray, y: np.ndarray, n_folds: int = 5):
+    @staticmethod
+    def _grouped_splits(y, groups, n_folds, random_state):
+        """Assign whole model groups within each family to preserve coverage.
+
+        Generic stratified group heuristics can place a scarce family's models
+        in the same fold. Here every family contributes at least one complete
+        model group to every validation fold and remains present in training.
+        """
+        y, groups = np.asarray(y), np.asarray(groups)
+        if groups.ndim != 1 or groups.shape != y.shape:
+            raise ValueError("groups must contain one model label per training row")
+        for group in np.unique(groups):
+            if len(np.unique(y[groups == group])) != 1:
+                raise ValueError(f"Model group {group!r} has conflicting family labels")
+        rng = np.random.default_rng(random_state)
+        folds = [[] for _ in range(n_folds)]
+        total_sizes = np.zeros(n_folds, dtype=int)
+        for label in np.unique(y):
+            class_groups = np.unique(groups[y == label])
+            if len(class_groups) < n_folds:
+                raise ValueError("Every family needs at least one model group per fold")
+            members = [np.flatnonzero(groups == group) for group in class_groups]
+            # Shuffle ties, then greedily distribute large groups first.
+            order = rng.permutation(len(members))
+            order = sorted(order, key=lambda i: -len(members[i]))
+            class_sizes = np.zeros(n_folds, dtype=int)
+            for idx in order:
+                candidates = np.flatnonzero(class_sizes == class_sizes.min())
+                candidates = candidates[total_sizes[candidates] == total_sizes[candidates].min()]
+                fold = int(rng.choice(candidates))
+                folds[fold].extend(members[idx].tolist())
+                class_sizes[fold] += len(members[idx])
+                total_sizes[fold] += len(members[idx])
+        all_indices = np.arange(len(y))
+        present = set(np.unique(y))
+        splits = []
+        for fold in folds:
+            val_idx = np.array(sorted(fold), dtype=int)
+            train_idx = np.setdiff1d(all_indices, val_idx)
+            if set(y[train_idx]) != present or set(y[val_idx]) != present:
+                raise ValueError("Grouped split omitted a family from training or validation")
+            splits.append((train_idx, val_idx))
+        return splits
+
+    def cross_validate(self, X: np.ndarray, y: np.ndarray, n_folds: int = 5,
+                       groups=None, random_state: int = 42):
         """Run k-fold cross-validation and return per-family metrics.
 
         Args:
             X: Feature matrix (n_samples, n_features).
             y: Label vector (n_samples,).
             n_folds: Number of folds (default 5).
+            groups: Optional per-sample group label (the model each fingerprint
+                came from). Whole model groups are assigned within each family,
+                keeping models disjoint and every known family on both sides.
 
         Returns:
             Dict with keys:
@@ -515,28 +710,84 @@ class EnsembleClassifier:
             - mean_accuracy: float
             - per_family: dict mapping family name -> {precision, recall, f1}
             - confusion_matrix: np.ndarray
+            - grouped: whether group-aware splitting was used
+            - limiting_family / n_groups: what capped the fold count
+            - argmax_mean_accuracy / argmax_fold_accuracies: closed-set ensemble
+              scores, before the shared identification pipeline's rejection
+            - accepted_coverage / accepted_accuracy: final-policy coverage and
+              accuracy conditional on an accepted family
         """
         from sklearn.model_selection import StratifiedKFold
         from sklearn.metrics import precision_recall_fscore_support, confusion_matrix
+        from llm_fingerprinter.identification import IdentificationPipeline
 
-        unique_classes = np.unique(y)
+        X, y = np.asarray(X), np.asarray(y)
+
         # Fold count from the smallest non-empty class — reserved/empty families
         # show up as a 0 count and would otherwise force folds to 0.
         class_counts = np.bincount(y.astype(int))
         present_counts = class_counts[class_counts > 0]
-        smallest_class = present_counts.min() if present_counts.size else 0
-        actual_folds = min(n_folds, int(smallest_class))
+        smallest_class = int(present_counts.min()) if present_counts.size else 0
+
+        grouped = groups is not None
+        limiting_family = None
+        n_groups = None
+
+        if grouped:
+            groups = np.asarray(groups)
+            if groups.ndim != 1 or groups.shape != y.shape:
+                raise ValueError("groups must contain one model label per training row")
+            # A class can be split at most as many ways as it has distinct models.
+            per_class_groups = {
+                int(c): len(set(groups[y == c])) for c in np.unique(y)
+            }
+            # Sort by (group count, family name) so ties report deterministically.
+            limiting_class = min(
+                per_class_groups,
+                key=lambda c: (per_class_groups[c], self.families_inv.get(c, str(c)))
+            )
+            n_groups = per_class_groups[limiting_class]
+            limiting_family = self.families_inv.get(limiting_class, str(limiting_class))
+            actual_folds = min(n_folds, n_groups, smallest_class)
+        else:
+            logger.warning(
+                "Cross-validating without group labels: repeated simulations of "
+                "the same model will be split across folds, so the accuracy "
+                "reported here is optimistic."
+            )
+            actual_folds = min(n_folds, smallest_class)
+
         if actual_folds < 2:
-            logger.warning("Not enough samples per class for cross-validation")
+            if grouped:
+                logger.warning(
+                    f"Not enough distinct models per family for grouped "
+                    f"cross-validation (family '{limiting_family}' has only "
+                    f"{n_groups}). Collect fingerprints for another model in that "
+                    f"family, or pass groups=None to accept an optimistic estimate."
+                )
+            else:
+                logger.warning("Not enough samples per class for cross-validation")
             return None
 
-        skf = StratifiedKFold(n_splits=actual_folds, shuffle=True, random_state=42)
+        if grouped:
+            split_iter = self._grouped_splits(y, groups, actual_folds, random_state)
+            logger.info(
+                f"Grouped cross-validation: {actual_folds} folds "
+                f"(capped by family '{limiting_family}' with {n_groups} distinct models)"
+            )
+        else:
+            splitter = StratifiedKFold(
+                n_splits=actual_folds, shuffle=True, random_state=random_state)
+            split_iter = splitter.split(X, y)
 
         fold_accuracies = []
+        argmax_fold_accuracies = []
+        accepted = 0
+        accepted_correct = 0
         all_y_true = []
         all_y_pred = []
 
-        for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X, y)):
+        for fold_idx, (train_idx, val_idx) in enumerate(split_iter):
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
 
@@ -548,20 +799,36 @@ class EnsembleClassifier:
                 augment_data=self.augment_data,
                 augment_noise_std=self.augment_noise_std,
                 augment_samples=self.augment_samples,
+                early_stop_variants=self.early_stop_variants,
+                embedding_pca_dim=self.embedding_pca_dim,
+                n_layers=self.n_layers,
+                ood_confidence_threshold=self.ood_confidence_threshold,
+                ood_disagreement_threshold=self.ood_disagreement_threshold,
+                random_state=self.random_state,
             )
-            temp.train(X_train, y_train)
+            if not temp.train(X_train, y_train):
+                logger.error(f"Cross-validation training failed in fold {fold_idx + 1}")
+                return None
+            pipeline = IdentificationPipeline(temp)
 
             correct = 0
+            argmax_correct = 0
             for i in range(len(X_val)):
-                family, _, _, _ = temp.predict_with_confidence(X_val[i])
-                pred_id = self.model_families.get(family, -1)
+                decision = pipeline.classify(X_val[i])
+                family = decision.get("ensemble_result", {}).get("predicted_family")
+                argmax_correct += self.model_families.get(family, -1) == int(y_val[i])
+                pred_id = self.model_families.get(decision.get("family"), -1)
                 all_y_true.append(int(y_val[i]))
                 all_y_pred.append(pred_id)
+                if pred_id >= 0:
+                    accepted += 1
+                    accepted_correct += pred_id == int(y_val[i])
                 if pred_id == int(y_val[i]):
                     correct += 1
 
             acc = correct / len(X_val)
             fold_accuracies.append(acc)
+            argmax_fold_accuracies.append(argmax_correct / len(X_val))
             logger.info(f"Fold {fold_idx + 1}/{actual_folds}: accuracy={acc:.3f}")
 
         all_y_true = np.array(all_y_true)
@@ -570,7 +837,10 @@ class EnsembleClassifier:
         precision, recall, f1, support = precision_recall_fscore_support(
             all_y_true, all_y_pred, labels=list(range(self.n_classes)), zero_division=0
         )
-        cm = confusion_matrix(all_y_true, all_y_pred, labels=list(range(self.n_classes)))
+        # Keep rejected examples visible; otherwise the confusion matrix silently
+        # loses rows while per-family support still includes them.
+        cm_labels = list(range(self.n_classes)) + [-1]
+        cm = confusion_matrix(all_y_true, all_y_pred, labels=cm_labels)
 
         per_family = {}
         for class_id in range(self.n_classes):
@@ -591,7 +861,17 @@ class EnsembleClassifier:
             "mean_accuracy": mean_acc,
             "per_family": per_family,
             "confusion_matrix": cm,
+            "confusion_labels": [self.families_inv.get(i, str(i)) for i in cm_labels[:-1]] + ["unknown"],
             "n_folds": actual_folds,
+            "grouped": grouped,
+            "limiting_family": limiting_family,
+            "n_groups": n_groups,
+            "argmax_fold_accuracies": argmax_fold_accuracies,
+            "argmax_mean_accuracy": float(np.mean(argmax_fold_accuracies)),
+            "accepted_coverage": accepted / len(all_y_true),
+            "accepted_accuracy": accepted_correct / accepted if accepted else None,
+            "rejected_count": len(all_y_true) - accepted,
+            "evaluation_policy": "shared_identification",
         }
 
 

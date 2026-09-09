@@ -6,6 +6,12 @@ from typing import Dict
 import numpy as np
 
 from llm_fingerprinter import config
+from llm_fingerprinter.feature_validation import (
+    FeatureValidationError,
+    validate_fingerprint_vector,
+    validate_response_features,
+    validate_training_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +49,11 @@ class FingerprintStore:
             "raw_features": self._serialize_value(fingerprint.get("raw_features", {})),
             "metadata": self._serialize_value(fingerprint.get("metadata", {})),
         }
+        # Keep original observations so future feature/schema changes can be
+        # evaluated without recollecting (and paying for) every model response.
+        for key in ("responses", "responses_sample", "per_prompt_features"):
+            if key in fingerprint:
+                data[key] = self._serialize_value(fingerprint[key])
 
         # Create safe filename (remove special characters)
         safe_model_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in model_name)
@@ -174,67 +185,41 @@ class FingerprintStore:
         return counts
 
     def _get_full_vector(self, data):
+        """Return a validated training vector, or log why this file is skipped.
 
-        vector = data.get("vector")
-        raw_features = data.get("raw_features", {})
+        Legacy complete observations remain supported. Explicit quality failures,
+        incompatible schemas and malformed vectors are never repaired by padding
+        or by substituting another representation from the same file.
+        """
+        try:
+            validate_training_metadata(data.get("metadata"))
+            vector = data.get("vector")
+            if vector is not None and np.asarray(vector).size:
+                return validate_fingerprint_vector(vector)
 
-        # Use stored vector directly if available
-        if vector is not None and len(vector) >= 400:
-            return vector
-
-        # Try per-layer reconstruction (new format)
-        layer_order = config.LAYER_ORDER
-        if any(layer in raw_features for layer in layer_order):
+            raw_features = data.get("raw_features") or {}
+            if not isinstance(raw_features, dict):
+                raise FeatureValidationError("raw_features must be an object")
             layer_vectors = []
-            for layer_name in layer_order:
-                layer_data = raw_features.get(layer_name, {})
-                embeddings = layer_data.get("embeddings")
-                linguistic = layer_data.get("linguistic")
-                behavioral = layer_data.get("behavioral")
-
-                if embeddings is None:
-                    logger.warning(f"No embeddings for layer '{layer_name}'")
-                    return None
-
+            for layer_name in config.LAYER_ORDER:
+                layer = raw_features.get(layer_name)
+                if not isinstance(layer, dict):
+                    raise FeatureValidationError(f"Missing features for layer '{layer_name}'")
                 parts = []
-                for arr in [embeddings, linguistic, behavioral]:
-                    if arr is not None:
-                        if not isinstance(arr, np.ndarray):
-                            arr = np.array(arr, dtype=np.float32)
-                        parts.append(arr)
-
-                layer_vectors.append(np.concatenate(parts))
-
-            full_vector = np.concatenate(layer_vectors)
-            logger.debug(f"Reconstructed per-layer vector: {len(full_vector)} dims")
-            return full_vector
-
-        # Fallback: old flat format
-        embeddings = raw_features.get("embeddings")
-        linguistic = raw_features.get("linguistic")
-        behavioral = raw_features.get("behavioral")
-
-        if embeddings is None:
-            logger.warning("No embeddings found in raw_features")
+                for name, size in (("embeddings", config.EMBEDDING_DIM),
+                                   ("linguistic", config.LINGUISTIC_DIM),
+                                   ("behavioral", config.BEHAVIORAL_DIM)):
+                    part = np.asarray(layer.get(name), dtype=np.float32)
+                    if part.shape != (size,):
+                        raise FeatureValidationError(
+                            f"Layer '{layer_name}' {name} has shape {part.shape}; expected ({size},)"
+                        )
+                    parts.append(part)
+                layer_vectors.append(validate_response_features(np.concatenate(parts)))
+            return validate_fingerprint_vector(np.concatenate(layer_vectors))
+        except (FeatureValidationError, TypeError, ValueError, OverflowError) as exc:
+            logger.warning(f"Skipping invalid fingerprint: {exc}")
             return None
-
-        if not isinstance(embeddings, np.ndarray):
-            embeddings = np.array(embeddings, dtype=np.float32)
-
-        if linguistic is None or behavioral is None:
-            logger.debug(f"Only embeddings available: {len(embeddings)} dims")
-            return embeddings
-
-        if not isinstance(linguistic, np.ndarray):
-            linguistic = np.array(linguistic, dtype=np.float32)
-        if not isinstance(behavioral, np.ndarray):
-            behavioral = np.array(behavioral, dtype=np.float32)
-
-        full_vector = np.concatenate([embeddings, linguistic, behavioral])
-        logger.debug(f"Reconstructed full vector: {len(full_vector)} dims "
-                    f"({len(embeddings)} + {len(linguistic)} + {len(behavioral)})")
-
-        return full_vector
 
     def export_by_model(self):
         """Export fingerprints grouped by exact model name.
@@ -299,6 +284,8 @@ class FingerprintStore:
             data = self.load_fingerprint(str(filepath))
             if not data:
                 continue
+            if self._get_full_vector(data) is None:
+                continue
             meta = data.get('metadata') or {}
             model_name = meta.get('model_name')
             family = meta.get('family') or data.get('family')
@@ -307,30 +294,59 @@ class FingerprintStore:
         logger.debug(f"Model→family map: {family_map}")
         return family_map
 
-    def export_for_training(self):
+    def export_for_training(self, with_groups: bool = False):
+        """Export training vectors grouped by family.
+
+        Args:
+            with_groups: also return, for each vector, the model it came from.
+                Several simulations of the SAME model (run at different
+                temperatures by `simulate`) are near-duplicates of each other.
+                Cross-validation must keep them on one side of the split, or it
+                validates against near-copies of its own training data and
+                reports an accuracy far above what a genuinely unseen model
+                would get. Vectors with no recorded model_name get a unique
+                group each, which is the most optimistic assumption available —
+                the caller is warned so the figure can be read accordingly.
+
+        Returns:
+            training_data, or (training_data, group_data) when with_groups.
+            Both map family -> list, aligned index for index.
+        """
         training_data = {}
-        
+        group_data = {}
+        ungrouped = 0
+
         for filepath in self.list_fingerprints():
             data = self.load_fingerprint(str(filepath))
             if data and data.get("family"):
                 family = data["family"]
-                
-                # Try to get or reconstruct the full 1206-dim vector
-                # (3 layers × 402 dims = 384 embed + 12 linguistic + 6 behavioral)
+
                 vector = self._get_full_vector(data)
-                
+
                 if vector is None:
                     logger.warning(f"Skipping {filepath}: could not get full vector")
                     continue
-                
-                if family not in training_data:
-                    training_data[family] = []
-                training_data[family].append(vector)
-                
+
+                model_name = (data.get('metadata') or {}).get('model_name')
+                if not model_name:
+                    ungrouped += 1
+                    model_name = f"__ungrouped__{filepath.name}"
+
+                training_data.setdefault(family, []).append(vector)
+                group_data.setdefault(family, []).append(model_name)
+
                 logger.debug(f"Loaded {family} fingerprint: {len(vector)} dims")
-        
+
         for family, vectors in training_data.items():
             if vectors:
                 logger.info(f"Exported {family}: {len(vectors)} samples, {len(vectors[0])} dims each")
-        
+
+        if with_groups:
+            if ungrouped:
+                logger.warning(
+                    f"{ungrouped} fingerprint(s) have no 'model_name' in metadata "
+                    f"and cannot be grouped for cross-validation. Re-run 'simulate' "
+                    f"to record it."
+                )
+            return training_data, group_data
         return training_data
