@@ -10,6 +10,14 @@ A black-box fingerprinting system that identifies the underlying LLM model famil
 
 A pre-trained classifier is bundled with the package in the `model/` directory.
 
+**Connect your own endpoint.** Use the custom backend with a request template for your chatbot, self-hosted model, or API gateway:
+
+```bash
+llm-fingerprinter identify -b custom -r ./custom_request.txt
+```
+
+[Set up a custom integration](#custom-endpoint-integration) with your endpoint's URL and JSON request body.
+
 <img src="img/gpt.png" width="400" height="400" alt="GPT">
 
 ---
@@ -43,17 +51,55 @@ Fingerprinting runs in three sequential layers:
 | `ollama-cloud` | Ollama Cloud API | ✅ `OLLAMA_CLOUD_API_KEY` |
 | `openai` | OpenAI API (or compatible) | ✅ `OPENAI_API_KEY` |
 | `gemini` | Gemini API | ✅ `GEMINI_API_KEY` |
-| `custom` | **Any HTTP-based LLM API** | ✅ Optional |
+| `custom` | **Your own HTTP endpoint accepting JSON POST requests** | Optional |
 
-### About the Custom Backend
+### Custom Endpoint Integration
 
-The **custom backend** is the most flexible option — use it with:
-- Proprietary LLM APIs not natively supported
-- Self-hosted LLMs behind HTTP endpoints
-- API proxies and gateways
-- Any HTTP-based LLM service
+**Use your existing API without writing a new backend client.** The custom integration sends the fingerprinting prompts through a JSON POST request that you define. It works with compatible proprietary APIs, self-hosted endpoints, chatbots, proxies and gateways.
 
-All you need is an HTTP request template file. See examples in `./example/`.
+**1. Create `custom_request.txt`.** Put the full endpoint URL on the first line, followed by the JSON body your API expects. Use `"$PROMPT$"` for the field that receives each fingerprinting prompt:
+
+```text
+https://your-endpoint.example/chat
+{
+  "message": "$PROMPT$"
+}
+```
+
+Replace the example URL and adapt the JSON fields to your API. For example, an API may require `prompt` instead of `message`, a `messages` array, or a fixed deployment name. The file contains only the URL and JSON template; do not include comments, HTTP headers or a `curl` command.
+
+**2. Run identification.** The tool substitutes each prompt, sends it to your endpoint, extracts the returned text and builds its fingerprint:
+
+```bash
+llm-fingerprinter identify -b custom -r ./custom_request.txt
+```
+
+`-b custom` selects the custom backend; `-r` selects the request file. The URL in that file determines the endpoint, so `--endpoint` does not override it. If your endpoint already selects its model, you can omit `--model`.
+
+**3. Add authentication if required.** For an endpoint using bearer-token authentication:
+
+```bash
+export CUSTOM_API_KEY="your-api-key"
+llm-fingerprinter identify -b custom -r ./custom_request.txt -k "$CUSTOM_API_KEY"
+```
+
+`-k` sends `Authorization: Bearer <key>`. Pass the variable explicitly as shown; the custom backend does not automatically read `CUSTOM_API_KEY`.
+
+**Optional template placeholders** let you adapt the request without changing application code:
+
+| Placeholder | Value |
+|-------------|-------|
+| `"$PROMPT$"` | Required: the current fingerprinting prompt |
+| `"$MODEL$"` | Model/deployment name supplied with `--model` |
+| `$TEMPERATURE$` | Requested sampling temperature; leave this placeholder unquoted |
+| `$MAX_TOKENS$` | Requested output-token limit; leave this placeholder unquoted |
+| `"$SYSTEM$"` | Optional system text; empty by default in the CLI |
+
+Include only fields your endpoint supports. Hardcode a required system message in the JSON template. If you use `"$MODEL$"`, supply `--model your-deployment-name` when running the command.
+
+**Supported responses:** common JSON text fields such as `response`, `text`, `answer` and `choices[0].message.content`, plus SSE, NDJSON and responses declared as `Content-Type: text/plain`. Streamed spaces and newlines are preserved; malformed streams and explicit error events are rejected instead of becoming answer text. Unusual JSON response paths, custom authentication headers and headerless plaintext require configuration through the Python `CustomClient` API.
+
+Request-file examples: [local Ollama](example/ollama_local_request.txt), [Ollama Cloud](example/ollama_cloud_request.txt), and [OpenAI-compatible chat](example/openai_request.txt). The OpenAI-compatible example uses `"$MODEL$"`, so pass `--model` as well as any required API key.
 
 ---
 
@@ -79,6 +125,16 @@ pip install llm-fingerprinter[all]
 
 ### 1. Identify a Model (Pre-trained Classifier)
 
+**Custom endpoint — bring your own API:**
+
+```bash
+llm-fingerprinter identify -b custom -r ./custom_request.txt
+```
+
+See [Custom Endpoint Integration](#custom-endpoint-integration) to create the request file or add authentication.
+
+**Built-in backends:**
+
 ```bash
 # Local Ollama
 llm-fingerprinter identify -b ollama --model llama3.2
@@ -86,9 +142,6 @@ llm-fingerprinter identify -b ollama --model llama3.2
 # OpenAI
 export OPENAI_API_KEY="your-key"
 llm-fingerprinter identify -b openai --model gpt-4o-mini
-
-# Custom endpoint
-llm-fingerprinter identify -b custom -r ./custom_request.txt
 ```
 
 ### 2. Train Your Own Classifier
